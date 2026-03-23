@@ -49,6 +49,13 @@ Install the [Customaise Chrome extension](https://customaise.com) and enable **M
 }
 ```
 
+**Codex** (`~/.codex/config.toml`):
+```toml
+[mcp_servers.customaise]
+command = "npx"
+args = ["-y", "@customaise/mcp"]
+```
+
 **Antigravity** (`mcp_config.json`):
 ```json
 {
