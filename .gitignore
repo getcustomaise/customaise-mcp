@@ -1,0 +1,5 @@
+node_modules/
+dist/
+test-out/
+*.tgz
+.DS_Store
