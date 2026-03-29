@@ -1,6 +1,6 @@
 # @customaise/mcp
 
-MCP server that connects AI coding agents to the [Customaise](https://customaise.com) Chrome extension for userscript management and browser automation.
+MCP server that connects AI coding agents to the [Customaise](https://customaise.com) Chrome extension for userscript management, visual DOM targeting, and browser automation.
 
 ```
 AI Agent ←(stdio)→ MCP Server ←(WebSocket)→ Customaise Extension
@@ -49,6 +49,18 @@ Install the [Customaise Chrome extension](https://customaise.com) and enable **M
 }
 ```
 
+**Kiro** (`.kiro/mcp.json`):
+```json
+{
+  "mcpServers": {
+    "customaise": {
+      "command": "npx",
+      "args": ["-y", "@customaise/mcp"]
+    }
+  }
+}
+```
+
 **Codex** (`~/.codex/config.toml`):
 ```toml
 [mcp_servers.customaise]
@@ -69,9 +81,9 @@ args = ["-y", "@customaise/mcp"]
 ```
 
 ### 3. Done!
-Your AI agent can now manage userscripts, inspect browser pages, and take screenshots — all through natural language.
+Your AI agent can now manage userscripts, visually target DOM elements, inspect browser pages, and take screenshots — all through natural language.
 
-## Available Tools (12)
+## Available Tools (13)
 
 ### Script Lifecycle
 | Tool | Description |
@@ -89,11 +101,16 @@ Your AI agent can now manage userscripts, inspect browser pages, and take screen
 | `get_console_context` | Console logs, errors, and GM_log output |
 | `list_tabs` | List all open browser tabs |
 
+### Visual DOM Targeting
+| Tool | Description |
+|------|-------------|
+| `get_selected_elements` | Get DOM elements the user has visually selected in the browser, with bulletproof selectors and screenshots |
+
 ### Testing & Verification
 | Tool | Description |
 |------|-------------|
 | `reload_tab` | Reload a tab to re-inject scripts |
-| `take_screenshot` | Capture a screenshot of the visible tab |
+| `take_screenshot` | Capture a screenshot of the visible tab with optional element highlighting |
 
 ### UI Control
 | Tool | Description |
@@ -105,15 +122,31 @@ Your AI agent can now manage userscripts, inspect browser pages, and take screen
 |------|-------------|
 | `sync_scripts` | Bulk export all scripts to a local directory |
 
+## Visual DOM Selection
+
+Users can visually select elements in the browser, and the extension automatically pushes context files to your workspace in real-time:
+
+```
+.customaise/dom-context/<script-name>/
+├── element-name.dom.md          # Selectors, element context, user comments
+├── element-name.screenshot.png  # Cropped screenshot of the selected element
+└── ...
+```
+
+Use `get_selected_elements` to retrieve selections programmatically, or read the auto-pushed `.dom.md` files directly from the workspace.
+
+Each selection includes **bulletproof tiered selectors** (stable IDs → data attributes → ARIA → semantic classes → structural positioning) for resilient element targeting that survives page updates.
+
 ## Typical Workflow
 
 ```
-1. get_page_context     → understand the target page
-2. write .user.js file  → AI creates the script using IDE tools
-3. export_script        → Customaise validates and installs
-4. reload_tab           → re-inject the script
-5. get_console_context  → check for errors
-6. take_screenshot      → verify visual result
+1. get_page_context       → understand the target page
+2. User selects elements  → .dom.md files auto-pushed to workspace
+3. Write .user.js file    → AI creates the script using IDE tools
+4. export_script          → Customaise validates and installs
+5. reload_tab             → re-inject the script
+6. get_console_context    → check for errors
+7. take_screenshot        → verify visual result (with element highlighting)
 ```
 
 ## File Sync

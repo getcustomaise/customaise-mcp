@@ -39,6 +39,7 @@ export class ExtensionBridge {
   private pending = new Map<string, PendingRequest>();
   private port: number;
   private requestTimeoutMs: number;
+  private pushHandler: ((type: string, data: any) => void) | null = null;
 
   constructor(port = 4050, requestTimeoutMs = 30_000) {
     this.port = port;
@@ -128,6 +129,14 @@ export class ExtensionBridge {
   }
 
   /**
+   * Register a handler for push messages from the extension.
+   * Push messages have a `type` field but no matching pending request.
+   */
+  onPush(handler: (type: string, data: any) => void): void {
+    this.pushHandler = handler;
+  }
+
+  /**
    * Close the WebSocket server and all connections.
    */
   async close(): Promise<void> {
@@ -161,7 +170,12 @@ export class ExtensionBridge {
   private _handleResponse(message: BridgeResponse): void {
     const pending = this.pending.get(message.id);
     if (!pending) {
-      this._log(`Received response for unknown request id: ${message.id}`);
+      // Check if this is a push message from the extension
+      if ((message as any).type && this.pushHandler) {
+        this.pushHandler((message as any).type, (message as any).data || {});
+      } else {
+        this._log(`Received response for unknown request id: ${message.id}`);
+      }
       return;
     }
 
