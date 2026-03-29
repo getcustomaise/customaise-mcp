@@ -1,6 +1,6 @@
 {
   "name": "@customaise/mcp",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "MCP server that connects AI coding agents (Cursor, Claude Code, Codex, Windsurf, Kiro, Antigravity) to the Customaise Chrome extension for userscript management and browser automation.",
   "type": "module",
   "main": "dist/index.js",

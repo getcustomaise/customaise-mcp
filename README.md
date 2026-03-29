@@ -133,6 +133,15 @@ Users can visually select elements in the browser, and the extension automatical
 └── ...
 ```
 
+> [!NOTE] 
+> **Where are the files saved?**
+> The MCP server writes the `.customaise` folder to its current working directory (usually your open project root in Cursor or Windsurf). 
+> If you are using a global IDE like Claude Desktop, it will default to your Home directory (`~/.customaise`). To force the files to save in a specific project folder, add the `CUSTOMAISE_WORKSPACE` environment variable to your MCP config:
+> 
+> ```json
+> "env": { "CUSTOMAISE_WORKSPACE": "/absolute/path/to/your/project" }
+> ```
+
 Use `get_selected_elements` to retrieve selections programmatically, or read the auto-pushed `.dom.md` files directly from the workspace.
 
 Each selection includes **bulletproof tiered selectors** (stable IDs → data attributes → ARIA → semantic classes → structural positioning) for resilient element targeting that survives page updates.

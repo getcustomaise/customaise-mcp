@@ -2,6 +2,12 @@
 
 All notable changes to `@customaise/mcp` will be documented in this file.
 
+## [1.1.1] - 2026-03-29
+
+### Fixed
+- Documented `CUSTOMAISE_WORKSPACE` environment variable for IDEs that don't set cwd to the project root (Claude Desktop, Antigravity)
+- Clarified where `.customaise/dom-context/` files are saved in the README
+
 ## [1.1.0] - 2026-03-29
 
 ### Added
