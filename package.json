@@ -1,7 +1,7 @@
 {
   "name": "@customaise/mcp",
-  "version": "1.1.1",
-  "description": "MCP server that connects AI coding agents (Cursor, Claude Code, Codex, Windsurf, Kiro, Antigravity) to the Customaise Chrome extension for userscript management and browser automation.",
+  "version": "1.2.0",
+  "description": "MCP server bridging AI coding agents (Cursor, Claude Code, Codex, Windsurf, Kiro, Antigravity) to the Customaise Chrome extension. 18 tools: UserScripts, AgentScripts, WebMCP calls with HITL consent, visual DOM targeting, tab control.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -9,7 +9,9 @@
   },
   "files": [
     "dist/",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc",
@@ -22,6 +24,10 @@
     "mcp",
     "customaise",
     "userscripts",
+    "agentscripts",
+    "webmcp",
+    "hitl",
+    "human-in-the-loop",
     "chrome-extension",
     "browser-automation",
     "model-context-protocol",
@@ -33,7 +39,7 @@
     "kiro",
     "antigravity"
   ],
-  "author": "Customaise",
+  "author": "CNDLE Studio LTD",
   "license": "MIT",
   "homepage": "https://customaise.com",
   "repository": {
