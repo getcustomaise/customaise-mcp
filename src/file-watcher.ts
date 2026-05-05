@@ -8,13 +8,13 @@
 
 import { watch, type FSWatcher, readFileSync, existsSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { ExtensionBridge } from './extension-bridge.js';
+import type { Bridge } from './bridge.js';
 
 const LOG_PREFIX = '[customaise-mcp:watcher]';
 
 export class FileWatcher {
   private watcher: FSWatcher | null = null;
-  private bridge: ExtensionBridge;
+  private bridge: Bridge;
   private directory: string = '';
 
   /** filenames we recently wrote — mute window to prevent re-export loops */
@@ -25,7 +25,7 @@ export class FileWatcher {
   private debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private debounceMs = 500;
 
-  constructor(bridge: ExtensionBridge) {
+  constructor(bridge: Bridge) {
     this.bridge = bridge;
   }
 
@@ -130,8 +130,15 @@ export class FileWatcher {
 
       console.error(`${LOG_PREFIX} Auto-exporting ${fileName} → ${scriptId}`);
 
-      // Send to extension via bridge
-      const result = await this.bridge.request('export_script', {
+      // Send to extension via bridge. Auto-export from the file
+      // watcher counts toward the user's MCP cap (ARD §4.1: every
+      // successful tool dispatch counts) — same +1 as if the IDE had
+      // called export_script directly. dispatchTool throws McpError
+      // (cap-exceeded, etc.); on cap-exceeded we surface the message
+      // to stderr but otherwise let the watcher keep running so a
+      // later cap reset / tier upgrade resumes auto-sync without a
+      // server restart.
+      const result = await this.bridge.dispatchTool('export_script', {
         code,
         scriptId,
       }) as { success?: boolean; error?: string };

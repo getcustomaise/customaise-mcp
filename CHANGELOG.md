@@ -2,6 +2,45 @@
 
 All notable changes to `@customaise/mcp` will be documented in this file.
 
+## [2.0.1] - 2026-05-05
+
+### Fixed
+- **Documentation only.** The 2.0.0 release notes referenced "Customaise extension 1.4.0 or newer" as the v2 bridge cutoff. The actual cutoff is **1.2.3**, which is the version that ships the v2 bridge to the Chrome Web Store. README and CHANGELOG corrected. No code change.
+
+## [2.0.0] - 2026-05-05
+
+### Added
+- **Free tier with caps.** MCP Bridge is now free for any signed-in Customaise user. Free use is capped at **50 successful tool calls per UTC day** and **150 per rolling 7-day window**. Power User unlocks unlimited. The cap covers every successful tool dispatch (built-in tools and WebMCP calls alike); failed calls and protocol-level traffic do not count toward it.
+- **Sign-in required.** The bridge no longer accepts anonymous sessions. Sign in to Customaise from the extension popup before adding the MCP server to your IDE config.
+- **New JSON-RPC error codes** in the implementation-defined slot, returned with structured `data` payloads so IDEs can render rich messages:
+  - `-32028 MCP_AUTH_REQUIRED`. Sign in to Customaise from the extension popup.
+  - `-32029 MCP_CAP_EXCEEDED`. Free cap reached. `data` carries `scope`, `used`, `limit`, `resetAt` so the IDE can show when access resumes.
+  - `-32030 MCP_DISPATCH_TIMEOUT`. Extension did not ack within the configured window (default 90s, override via `CUSTOMAISE_MCP_DISPATCH_TIMEOUT_MS`).
+  - `-32031 MCP_EXTENSION_OUTDATED`. Update Customaise from the Chrome Web Store.
+  - `-32032 MCP_INTEGRITY_VIOLATION`. Reconnect MCP from the Customaise extension Settings.
+
+### Changed (breaking)
+- **v2 bridge protocol.** The WebSocket frames between the MCP server and the Customaise extension changed shape. **This MCP server requires Customaise extension 1.2.3 or newer.** Older extensions return `-32031 MCP_EXTENSION_OUTDATED` on first dispatch.
+- **Server version reported on the MCP handshake** is now `2.0.0`.
+
+### Compatibility
+- Requires Customaise extension 1.2.3 or newer.
+- No change to `.cursor/mcp.json` / `.windsurf/mcp.json` / `claude_desktop_config.json` / Codex / Antigravity / Kiro configs. Existing IDE configs continue to work unchanged.
+
+## [1.3.0] - 2026-04-23
+
+### Added
+- **Multi-IDE support.** Run `customaise-mcp` from more than one IDE at the same time (e.g. Cursor + Claude Code, or Antigravity + Windsurf). Previously a second instance exited with "MCP error -32000: Connection closed" because port 4050 was already taken; now the second instance automatically routes through the first and both IDEs can use the Customaise extension concurrently.
+- **Connected-IDE visibility in the extension.** The Customaise sidebar (Settings → Developer Tools) now shows which MCP version is connected and which IDEs are using it — useful to confirm the right agent is wired in before issuing commands.
+
+### Security
+- **Loopback-only WebSocket bridge.** WS handshakes from non-loopback addresses are rejected at 403. Closes a narrow LAN-peer probing path. No compat impact — the extension and MCP client both connect via localhost.
+- **Handshake validation on the second MCP instance.** If the second instance finds port 4050 held by something that isn't `customaise-mcp`, it fails fast with a clear error instead of hanging.
+
+### Compatibility
+- No MCP-client-side contract changes. Existing `.cursor/mcp.json` / `.windsurf/mcp.json` / etc. configs continue to work unchanged.
+- Requires Customaise extension 1.3.0+ to see the new connected-IDE panel; older extensions still work with this MCP but won't render the version/client list.
+
 ## [1.2.0] - 2026-04-19
 
 ### Added

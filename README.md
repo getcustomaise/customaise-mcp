@@ -270,8 +270,14 @@ The MCP server listens on `ws://localhost:4050` in plaintext on your loopback in
 ## Requirements
 
 - **Node.js** ≥ 18
-- **Chrome** with the Customaise extension installed
-- **MCP Bridge** enabled in Customaise Settings (Power User feature)
+- **Chrome** with the Customaise extension installed (≥ 1.2.3 for the v2 bridge protocol — older extensions still work but don't surface the cap-usage display)
+- **MCP Bridge** enabled in Customaise Settings (free, signed-in)
+
+## Plan tiers
+
+The MCP Bridge is free for any signed-in Customaise user. Free use is capped at **50 calls per UTC day** and **150 calls per rolling 7-day window**. **Power User** unlocks unlimited MCP. The cap covers every successful tool dispatch (built-in tools and WebMCP calls alike); failed calls and protocol-level traffic don't count.
+
+When the cap fires, the server returns a JSON-RPC error in the implementation-defined `-32029` slot with a human-readable message + structured `data` carrying scope, used/limit, and reset timestamp. IDEs that surface tool errors render the message verbatim. Sign-in is required regardless of tier; without a fresh Firebase ID token the server returns `-32028 MCP_AUTH_REQUIRED`.
 
 ## Troubleshooting
 

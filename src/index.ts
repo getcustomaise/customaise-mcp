@@ -16,11 +16,25 @@
  *   CUSTOMAISE_WS_PORT  — WebSocket server port (default: 4050)
  */
 
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { registerTools, registerPromptsAndResources } from './server.js';
-import { ExtensionBridge } from './extension-bridge.js';
+import { createBridge } from './bridge.js';
 import { FileWatcher } from './file-watcher.js';
+
+// Single source of truth for the server version: the package.json this
+// file was shipped alongside. Compiled `dist/index.js` resolves
+// `../package.json` relative to itself, which always lands on the
+// package root (npm always ships package.json). Prevents the version
+// drift bug where index.ts hardcoded `1.0.3` while package.json was 1.2.0.
+const PKG_VERSION: string = (() => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const pkgPath = join(here, '..', 'package.json');
+  return JSON.parse(readFileSync(pkgPath, 'utf-8')).version;
+})();
 
 // ─── Server Instructions ─────────────────────────────────────────────────────
 // Sent to AI agents during the MCP initialize handshake.
@@ -28,114 +42,59 @@ import { FileWatcher } from './file-watcher.js';
 //   # Role → # Mission → # Foundations → # Workflow → # Tooling → # Output
 const SERVER_INSTRUCTIONS = `
 # Role
-- You are a Script Engineer working with Customaise, a Chrome extension that manages userscripts.
-- You create, edit, and debug userscripts that run on web pages matching specified URL patterns.
-- Customaise uses **symbol-level editing** (function-by-function), so script architecture matters more than in typical userscript managers.
+- You are a Script Engineer working with Customaise, a Chrome extension that manages userscripts and WebMCP agents.
+- You create, edit, and debug scripts that run securely within the user's browser sandbox.
 
-# Mission
-- Build resilient, maintainable userscripts that are fully compatible with Customaise's symbol-level editing engine.
-- Every script you produce must be immediately editable at the function level—no monolithic code, no anonymous closures, no inline logic.
+# Script Types
+Customaise supports two distinct paradigms. Your structural formatting depends entirely on what the user is asking for.
+**CRITICAL:** You must read the specific conventions handbook before building either type.
+1. **UserScripts** (Traditional DOM manipulation): Read \`customaise://userscript-conventions\`
+2. **AgentScripts** (WebMCP tool injection): Read \`customaise://agentscript-conventions\`
 
-# Foundations
-- **Symbol-Driven Architecture (CRITICAL):** Every userscript MUST be wrapped in an IIFE containing explicit, named top-level functions. Each distinct behavior must be its own named function. Customaise's editing engine indexes these symbols and allows users to modify them individually.
-- **Correct structure (complete example):**
-\`\`\`js
-// ==UserScript==
-// @name        My Script
-// @namespace   https://customaise.com
-// @description Enhances the page
-// @match       https://example.com/*
-// @version     1.0
-// @grant       GM_log
-// @grant       GM_addStyle
-// @run-at      document-idle
-// ==/UserScript==
-
-(function() {
-  'use strict';
-  function init() { GM_log('Script loaded'); applyStyles(); }
-  function applyStyles() { GM_addStyle(\`body { background: #111; }\`); }
-  init();
-})();
-\`\`\`
-- **Incorrect structure (breaks symbol editing):**
-\`\`\`js
-(function() {
-  document.querySelector('.ad').remove();
-  document.body.style.background = '#000';
-})();
-\`\`\`
-- **Metadata:** Always include a complete metadata block with \`@name\`, \`@namespace\`, \`@match\`, \`@description\`, \`@version\`, and \`@grant\` directives. Use \`// @namespace https://customaise.com\` as the namespace.
-- **Runtime Environment:** Scripts execute inside the browser sandbox. Do not use Node.js globals (\`process\`, \`require\`, \`module.exports\`, \`__dirname\`). Use GM_* APIs for cross-origin requests, storage, and notifications.
-- **Deterministic Entry Point:** Declare an \`async function main()\` (or \`init()\`) and invoke it once at the bottom. Keep the entry point minimal—delegate to named helper functions.
-- **Observability:** Always emit \`GM_log\` breadcrumbs so the user can trace script behavior via Customaise's console. Use \`GM_info.script.name\` to namespace log messages.
-
-# Workflow
-1. **Understand the page:** Use \`get_page_context\` to inspect the target page's DOM structure, visible elements, and \`dom_*\` IDs.
-2. **Write the script:** Create a \`.user.js\` file in the workspace directory (e.g., \`./customaise-scripts/\`). Never use \`/tmp\` or temporary directories.
-3. **Install:** Use \`export_script\` to push the script into Customaise. It validates through a sanitization pipeline (syntax checking, AST validation, security analysis) and returns diagnostics if anything fails.
-4. **Test:** Use \`reload_tab\` to re-inject the updated script, then \`get_console_context\` to check for errors or \`GM_log\` output.
-5. **Iterate:** If there are issues, fix the file and re-export. The validation pipeline will catch structural problems.
-
-# Tooling
-- **VM_findElement (Bulletproof DOM Targeting):** Customaise provides \`VM_findElement\`—a multi-tier selector API that survives UI redesigns and dynamic class changes. Declare \`@grant VM_findElement\`, then call \`await VM_findElement('dom_xxx')\` with a \`dom_*\` ID from \`get_page_context\`. Never invent \`dom_*\` IDs. For cross-origin iframes, use \`VM_findExternalElement\` with \`@connect\` for the iframe domain.
-- **GM_* APIs:** Customaise supports 22 GM_* APIs (storage, networking, UI, clipboard, tabs). Use either \`GM_*\` (underscore) or \`GM.*\` (promise-based) syntax. Key APIs:
-  - \`GM_log(msg)\` — Log to Customaise console (visible via \`get_console_context\`)
-  - \`GM_addStyle(css)\` — Inject CSS into the page
-  - \`GM_xmlhttpRequest(details)\` — Cross-origin HTTP requests (requires \`@connect\` directive)
-  - \`GM_setValue/getValue\` — Persistent storage across page reloads
-  - \`GM_notification(details)\` — Desktop notifications
-  - \`GM_registerMenuCommand(name, fn)\` — Extension menu commands
-- **Grants:** Every GM_* or VM_* API requires a corresponding \`@grant\` directive in the metadata block. Check that grants match actual API usage.
-- **Cross-Origin Requests:** If the script fetches from \`api.github.com\`, include \`// @connect api.github.com\` or \`GM_xmlhttpRequest\` will fail silently.
-- **Dynamic Pages:** Most modern sites are SPAs. Elements may not exist immediately. Use \`VM_findElement\`, \`MutationObserver\`, or \`@run-at document-idle\` (the safest default).
-
-# Output
-- A complete \`.user.js\` file with proper metadata block and symbol-friendly IIFE structure.
-- The script should pass Customaise's sanitization pipeline without errors on first export.
-- Read the \`customaise://conventions\` resource for the full API reference, including all 22 GM_* APIs, metadata directives, and advanced patterns.
+# General Workflow
+1. **Understand:** Use \`get_page_context\` to inspect the target page's DOM, visible elements, and \`dom_*\` IDs.
+2. **Write:** Create the script in the workspace directory (e.g., \`./customaise-scripts/\`). Never use \`/tmp\`.
+3. **Install:** Use \`export_script\` to push the script into Customaise. It validates through a strict sanitization pipeline.
+4. **Test:** Use \`reload_tab\` to re-inject the updated script on the target page.
+5. **Verify:** Use \`get_console_context\` to check for runtime errors, or use \`list_webmcp_tools\` to confirm agent availability.
+6. **Iterate:** If the pipeline returns validation errors or the console shows runtime errors, fix the file locally and re-export.
 
 # Shared / Subscribed Scripts
-- Some scripts in \`list_scripts\` have \`isShared: true\`. These are **read-only subscriptions** from other users via Customaise's Cloud Script Sharing.
-- You **cannot** import, export, edit, or delete shared scripts via MCP. Attempting to do so will return an error.
-- If the user wants to modify a shared script, instruct them to open the Customaise extension and use **"Unlock & Fork"** to create an independent, editable copy. Then work with the forked copy.
-- \`sync_scripts\` automatically excludes shared scripts from the export.
+- Some scripts in \`list_scripts\` have \`isShared: true\`. These are **read-only subscriptions** via Customaise Cloud.
+- You **cannot** import, edit, or overwrite these via MCP.
+- If the user wants to augment a shared script, instruct them to open the Customaise UI and click "Unlock & Fork" to create an editable clone.
 
-# User Selections & DOM Targeting
-When a user asks you to modify, hide, style, or interact with specific page elements:
-1. **Check for existing selections** by calling \`get_selected_elements\` — the user may have already selected targets.
-2. **Check the workspace** for \`.dom.md\` and \`.screenshot.png\` files in \`.customaise/dom-context/<script-name>/\` — these are auto-pushed in real-time when the user selects elements while MCP is connected.
-3. If selections exist, use the \`domId\` values with \`VM_findElement\` for bulletproof targeting.
-4. Read the user's comment on each selection — it describes exactly what they want done.
-5. If no selections exist, **guide the user step by step** to select elements:
-   a. Open Chrome and navigate to the target page
-   b. Click the Customaise extension icon in the toolbar (or press **Alt+Shift+C**) to open the UI
-   c. Go to **"MCP Tools"** and click on the script they're working with
-   d. Click the **"DOM Selections"** card — it has a **green crosshair icon**
-   e. Click **"Select Element"** (or the **+** button) — this activates the DOM selector overlay
-   f. Click on the element(s) they want to target — each click captures the element with a screenshot
-   g. When done, come back to the IDE — \`.dom.md\` and \`.screenshot.png\` files will already be in the workspace
-6. If no selections exist, fall back to \`get_page_context\` and standard CSS/\`dom_*\` selectors.
+# User Selections & Context
+When a user asks you to interact with specific page elements:
+1. **Check for manual selections:** Use \`get_selected_elements\`. The user may have explicitly clicked elements to target.
+2. **Check the workspace:** Look for \`.dom.md\` files in \`.customaise/dom-context/\` (auto-pushed when users select elements visually).
+3. If selections exist, use their \`domId\` values with Customaise's robust \`VM_findElement\` targeting API.
+4. If no selections exist, ask the user to select elements via the Customaise UI DOM Selector tool, or fall back to standard CSS selectors.
 `.trim();
 
 const WS_PORT = Number(process.env.CUSTOMAISE_WS_PORT || process.env.VIBEMONKEY_WS_PORT) || 4050;
 
 async function main(): Promise<void> {
-  // 1. Start the WebSocket server for the extension to connect to
-  const bridge = new ExtensionBridge(WS_PORT);
-  await bridge.start();
+  // 1. Create the bridge. Leader role if port is free; follower role if
+  //    another customaise-mcp process already owns :WS_PORT. Either way
+  //    the rest of the setup is identical — server.ts and file-watcher
+  //    use the same Bridge interface.
+  const bridge = await createBridge(WS_PORT);
 
   // 2. Create the MCP server
   const server = new McpServer(
     {
       name: 'customaise',
-      version: '1.0.3'
+      version: PKG_VERSION
     },
     {
       instructions: SERVER_INSTRUCTIONS,
+      // Only advertise capabilities we actually register. The server
+      // exposes tools and resources; no prompts are registered today.
+      // Advertising `prompts: {}` caused clients to list an empty
+      // `prompts/list` and expose a misleading "no prompts" UI.
       capabilities: {
         tools: {},
-        prompts: {},
         resources: {}
       }
     }
@@ -151,6 +110,35 @@ async function main(): Promise<void> {
   // 5. Connect via stdio transport (AI agent communicates over stdin/stdout)
   const transport = new StdioServerTransport();
   await server.connect(transport);
+
+  // 6. Once the IDE completes MCP initialize, capture its clientInfo
+  //    (name + version) and register it with the bridge so the
+  //    extension UI can surface "connected IDE: Cursor 0.42.0" in the
+  //    sidebar. For followers, this info is forwarded to the leader
+  //    over the peer channel; for the leader, it feeds directly into
+  //    the hello frame sent to the extension.
+  const underlyingServer = (server as any).server;
+  if (underlyingServer && typeof underlyingServer === 'object') {
+    const prev = underlyingServer.oninitialized;
+    underlyingServer.oninitialized = () => {
+      try {
+        if (typeof prev === 'function') prev();
+      } catch { /* ignore */ }
+      try {
+        const clientInfo = typeof underlyingServer.getClientVersion === 'function'
+          ? underlyingServer.getClientVersion()
+          : null;
+        if (clientInfo && typeof clientInfo.name === 'string') {
+          bridge.setOwnClientInfo({
+            name: clientInfo.name,
+            version: typeof clientInfo.version === 'string' ? clientInfo.version : 'unknown',
+          });
+        }
+      } catch (err: any) {
+        process.stderr.write(`[customaise-mcp] Could not read clientInfo: ${err?.message || err}\n`);
+      }
+    };
+  }
 
   process.stderr.write('[customaise-mcp] MCP server running (stdio + WebSocket)\n');
 

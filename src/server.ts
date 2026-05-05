@@ -23,22 +23,31 @@ function getWorkspaceDir(): string {
   return cwd;
 }
 
-import { ExtensionBridge } from './extension-bridge.js';
+import type { Bridge } from './bridge.js';
 import { FileWatcher } from './file-watcher.js';
 
 /**
  * Register all MCP tools with the server.
+ *
+ * **Cap-counting contract (ARD §4.4):** every tool handler in this
+ * function MUST dispatch via `bridge.dispatchTool(toolName, args)`,
+ * NOT `bridge.request(...)`. The former goes through cap enforcement
+ * + bilateral counter handshake; the latter is the legacy v1 envelope
+ * and bypasses cap. If you add a new tool, copy the pattern from any
+ * existing `server.tool(...)` handler. If you're tempted to use
+ * `bridge.request` for a "lightweight" call, the answer is no — read
+ * the JSDoc on `Bridge.request` for the reasoning.
  */
-export function registerTools(server: McpServer, bridge: ExtensionBridge, fileWatcher?: FileWatcher): void {
+export function registerTools(server: McpServer, bridge: Bridge, fileWatcher?: FileWatcher): void {
 
   // ─── Script Lifecycle ───────────────────────────────────────────────
 
   server.tool(
     'list_scripts',
-    'List all userscripts installed in Customaise with their IDs, names, enabled status, match patterns, and whether they are shared (subscribed). Scripts marked isShared are read-only subscriptions — they cannot be imported, exported, edited, or deleted via MCP. To modify a shared script, the user must fork it from the extension UI.',
+    'List all scripts (UserScripts & AgentScripts) installed in Customaise with their IDs, names, enabled status, match patterns, and whether they are shared (subscribed). Scripts marked isShared are read-only subscriptions — they cannot be imported, exported, edited, or deleted via MCP. To modify a shared script, the user must fork it from the extension UI.',
     {},
     async () => {
-      const result = await bridge.request('list_scripts', {});
+      const result = await bridge.dispatchTool('list_scripts', {});
       return {
         content: [{
           type: 'text' as const,
@@ -50,13 +59,13 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, fileWa
 
   server.tool(
     'import_script',
-    'Import an existing userscript from Customaise to a local file for editing. The file will include the full source code with metadata block. After editing the file with your IDE tools, use export_script to push changes back to Customaise. NOTE: Shared/subscribed scripts cannot be imported — they are read-only. The user must fork them from the extension UI first. IMPORTANT: Save files inside your current workspace or project directory (e.g., ./customaise-scripts/), never in /tmp.',
+    'Import an existing script (UserScript or AgentScript) from Customaise to a local file for editing. The file will include the full source code with metadata block. After editing the file with your IDE tools, use export_script to push changes back to Customaise. NOTE: Shared/subscribed scripts cannot be imported — they are read-only. The user must fork them from the extension UI first. IMPORTANT: Save files inside your current workspace or project directory (e.g., ./customaise-scripts/), never in /tmp.',
     {
       scriptId: z.string().describe('The ID of the script to import (get from list_scripts)'),
-      filePath: z.string().describe('Local file path inside your workspace to write the script to (e.g., ./customaise-scripts/my-script.user.js). Do NOT use /tmp.')
+      filePath: z.string().describe('Local file path inside your workspace to write the script to (e.g., ./customaise-scripts/my-script.agent.js). Do NOT use /tmp.')
     },
     async ({ scriptId, filePath }) => {
-      const result = await bridge.request('import_script', { scriptId }) as {
+      const result = await bridge.dispatchTool('import_script', { scriptId }) as {
         scriptId: string;
         source: string;
         metadata: Record<string, unknown>;
@@ -83,16 +92,17 @@ export function registerTools(server: McpServer, bridge: ExtensionBridge, fileWa
 
   server.tool(
     'export_script',
-    `Export a userscript from a local file into Customaise. The file will be validated through Customaise's sanitization pipeline (syntax checking, AST validation, security analysis). If valid, the script is installed and ready to execute on matching pages. If invalid, detailed diagnostics explain exactly what to fix. Pass scriptId to update an existing script instead of creating a new one. NOTE: You cannot overwrite a shared/subscribed script — they are read-only.
+    `Export a script from a local file into Customaise. The file will be validated through Customaise's sanitization pipeline (syntax checking, AST validation, security analysis). If valid, the script is installed and ready to execute on matching pages. If invalid, detailed diagnostics explain exactly what to fix. Pass scriptId to update an existing script instead of creating a new one. NOTE: You cannot overwrite a shared/subscribed script — they are read-only.
 
-Reminder: Scripts must use an IIFE with named functions for symbol-level editing, \`// @namespace https://customaise.com\`, and include @name, @match, @description, @version, and @grant directives.`,
+    Reminder for UserScripts: Must use an IIFE with named functions for symbol-level editing, \`// @namespace https://customaise.com\`, and standard directives (@name, @match, @grant).
+    Reminder for AgentScripts: MUST use \`// ==AgentScript==\` block, MUST explicitly declare tools via \`// @webmcp <toolName> <permission>\` (e.g. \`// @webmcp my_tool prompt\`). Permissions: allow (autonomous), prompt (interactive), deny (blocked). Must NOT use IIFEs. CAN use GM_* APIs for persistence, networking, and observability alongside \`navigator.modelContext.registerTool()\`.`,
     {
       filePath: z.string().describe('Local file path containing the userscript source code'),
       scriptId: z.string().optional().describe('ID of an existing script to update. Omit to create a new script.')
     },
     async ({ filePath, scriptId }) => {
       const code = readFileSync(filePath, 'utf-8');
-      const result = await bridge.request('export_script', { code, scriptId });
+      const result = await bridge.dispatchTool('export_script', { code, scriptId });
       return {
         content: [{
           type: 'text' as const,
@@ -106,12 +116,12 @@ Reminder: Scripts must use an IIFE with named functions for symbol-level editing
 
   server.tool(
     'delete_script',
-    'Permanently delete a userscript from Customaise. This action cannot be undone. NOTE: Shared/subscribed scripts cannot be deleted via MCP — the user must unsubscribe from the extension UI.',
+    'Permanently delete a script (UserScript or AgentScript) from Customaise. This action cannot be undone. NOTE: Shared/subscribed scripts cannot be deleted via MCP — the user must unsubscribe from the extension UI.',
     {
       scriptId: z.string().describe('The ID of the script to delete')
     },
     async ({ scriptId }) => {
-      const result = await bridge.request('delete_script', { scriptId });
+      const result = await bridge.dispatchTool('delete_script', { scriptId });
       return {
         content: [{
           type: 'text' as const,
@@ -129,7 +139,7 @@ Reminder: Scripts must use an IIFE with named functions for symbol-level editing
       enabled: z.boolean().describe('true to enable, false to disable')
     },
     async ({ scriptId, enabled }) => {
-      const result = await bridge.request('set_script_enabled', { scriptId, enabled });
+      const result = await bridge.dispatchTool('set_script_enabled', { scriptId, enabled });
       return {
         content: [{
           type: 'text' as const,
@@ -152,7 +162,7 @@ Reminder: Scripts must use an IIFE with named functions for symbol-level editing
       tabId: z.number().optional().describe('Tab ID to inspect. Defaults to the active tab.')
     },
     async ({ tabId }) => {
-      const result = await bridge.request('get_page_context', { tabId }) as Record<string, any>;
+      const result = await bridge.dispatchTool('get_page_context', { tabId }) as Record<string, any>;
 
       // Strip fields that are only for the extension's internal chat UI
       delete result.displayContent;
@@ -197,7 +207,7 @@ Reminder: Scripts must use an IIFE with named functions for symbol-level editing
       level: z.enum(['all', 'error', 'warn', 'info', 'debug']).optional().describe('Filter by log level. Default: all')
     },
     async ({ tabId, level }) => {
-      const result = await bridge.request('get_console_context', { tabId }) as {
+      const result = await bridge.dispatchTool('get_console_context', { tabId }) as {
         errors?: Array<Record<string, unknown>>;
         warnings?: Array<Record<string, unknown>>;
         userscriptLogs?: Array<Record<string, unknown>>;
@@ -262,7 +272,59 @@ Reminder: Scripts must use an IIFE with named functions for symbol-level editing
     'List all open browser tabs with their IDs, URLs, titles, and active status. Use to find a specific tab ID for other tools like reload_tab or take_screenshot.',
     {},
     async () => {
-      const result = await bridge.request('list_tabs', {});
+      const result = await bridge.dispatchTool('list_tabs', {});
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify(result, null, 2)
+        }]
+      };
+    }
+  );
+
+  server.tool(
+    'open_tab',
+    'Open a new browser tab with the specified URL. Returns the new tab ID.',
+    {
+      url: z.string().describe('The URL to open in the new tab'),
+      active: z.boolean().optional().describe('Whether the new tab should become the active tab. Defaults to true.')
+    },
+    async ({ url, active }) => {
+      const result = await bridge.dispatchTool('open_tab', { url, active });
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify(result, null, 2)
+        }]
+      };
+    }
+  );
+
+  server.tool(
+    'close_tab',
+    'Close a specific browser tab. Defaults to the active tab if no tabId is provided.',
+    {
+      tabId: z.number().optional().describe('The ID of the tab to close')
+    },
+    async ({ tabId }) => {
+      const result = await bridge.dispatchTool('close_tab', { tabId });
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify(result, null, 2)
+        }]
+      };
+    }
+  );
+
+  server.tool(
+    'focus_tab',
+    'Bring a specific browser tab to the front and make it active.',
+    {
+      tabId: z.number().describe('The ID of the tab to focus')
+    },
+    async ({ tabId }) => {
+      const result = await bridge.dispatchTool('focus_tab', { tabId });
       return {
         content: [{
           type: 'text' as const,
@@ -274,12 +336,16 @@ Reminder: Scripts must use an IIFE with named functions for symbol-level editing
 
   server.tool(
     'reload_tab',
-    'Reload a browser tab to re-inject updated userscripts. Use after export_script to see the effect of your changes. Waits for the page to fully load before returning.',
+    'Reload a browser tab to re-inject updated userscripts. Use after export_script to see the effect of your changes. Waits for the page to fully load before returning. If the tab has AgentScript (WebMCP) tools registered, automatically waits for them to re-register before returning.',
     {
       tabId: z.number().optional().describe('Tab ID to reload. Defaults to the active tab.')
     },
     async ({ tabId }) => {
-      const result = await bridge.request('reload_tab', { tabId });
+      // The bridge handler auto-detects WebMCP tabs and waits event-driven.
+      // No client-side polling needed — plain userscript tabs return immediately,
+      // AgentScript tabs auto-wait for tool re-registration.
+      const result = await bridge.dispatchTool('reload_tab', { tabId });
+
       return {
         content: [{
           type: 'text' as const,
@@ -297,7 +363,7 @@ Reminder: Scripts must use an IIFE with named functions for symbol-level editing
       filePath: z.string().optional().describe('Local file path to save the screenshot. Auto-generates a temp path if omitted.')
     },
     async ({ tabId, filePath }) => {
-      const result = await bridge.request('take_screenshot', { tabId }) as {
+      const result = await bridge.dispatchTool('take_screenshot', { tabId }) as {
         dataUrl: string;
         width?: number;
         height?: number;
@@ -331,7 +397,7 @@ Reminder: Scripts must use an IIFE with named functions for symbol-level editing
       panel: z.string().optional().describe('Panel to open: "scripts", "chat", "settings"')
     },
     async ({ tabId, panel }) => {
-      const result = await bridge.request('show_ui', { tabId, panel });
+      const result = await bridge.dispatchTool('show_ui', { tabId, panel });
       return {
         content: [{
           type: 'text' as const,
@@ -342,17 +408,53 @@ Reminder: Scripts must use an IIFE with named functions for symbol-level editing
   );
 
 
+  server.tool(
+    'list_webmcp_tools',
+    'List all WebMCP tools currently registered by AgentScripts for a specific browser tab. Use this to verify that an exported AgentScript is correctly registering its tools on the target page.',
+    {
+      tabId: z.number().optional().describe('Tab ID to query. Defaults to the active tab.')
+    },
+    async ({ tabId }) => {
+      const result = await bridge.dispatchTool('list_webmcp_tools', { tabId });
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify(result, null, 2)
+        }]
+      };
+    }
+  );
+
+  server.tool(
+    'call_webmcp_tool',
+    'Execute a registered WebMCP tool directly on the target browser tab. If the tool is interactive (trust level), the user will be natively prompted by CustomAIse to approve the execution before it returns.',
+    {
+      tabId: z.number().optional().describe('Tab ID to execute on. Defaults to active tab.'),
+      toolName: z.string().describe('The EXACT name of the WebMCP tool to invoke'),
+      toolArgs: z.record(z.any()).optional().describe('JSON object of arguments for the tool')
+    },
+    async ({ tabId, toolName, toolArgs }) => {
+      const result = await bridge.dispatchTool('call_webmcp_tool', { tabId, toolName, toolArgs });
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify(result, null, 2)
+        }]
+      };
+    }
+  );
+
   // ─── File Sync ──────────────────────────────────────────────────────
 
   server.tool(
     'sync_scripts',
-    'Bulk export all your own scripts from Customaise to a local directory as individual .user.js files. Creates a .customaise-manifest.json mapping filenames to script IDs. Shared/subscribed scripts are excluded (they are read-only). Use this to set up a local workspace for editing scripts with your IDE.',
+    'Bulk export all your own scripts from Customaise to a local directory as individual .user.js or .agent.js files. Creates a .customaise-manifest.json mapping filenames to script IDs. Shared/subscribed scripts are excluded (they are read-only). Use this to set up a local workspace for editing scripts with your IDE.',
     {
       directory: z.string().describe('Local directory to export scripts to (e.g., ./customaise-scripts/)')
     },
     async ({ directory }) => {
       // Get all scripts with code
-      const scripts = await bridge.request('list_scripts_with_code', {}) as Array<{
+      const scripts = await bridge.dispatchTool('list_scripts_with_code', {}) as Array<{
         id: string;
         name: string;
         code: string;
@@ -367,6 +469,10 @@ Reminder: Scripts must use an IIFE with named functions for symbol-level editing
       const usedNames = new Set<string>();
 
       for (const script of scripts) {
+        // Determine file extension based on content
+        const isAgentScript = typeof script.code === 'string' && script.code.includes('// ==AgentScript==');
+        const fileExt = isAgentScript ? '.agent.js' : '.user.js';
+
         // Generate a safe filename from the script name
         let safeName = (script.name || 'untitled')
           .toLowerCase()
@@ -375,10 +481,10 @@ Reminder: Scripts must use an IIFE with named functions for symbol-level editing
           .replace(/^-|-$/g, '');
 
         // Handle filename collisions — append short ID suffix if name already used
-        let fileName = `${safeName}.user.js`;
+        let fileName = `${safeName}${fileExt}`;
         if (usedNames.has(fileName)) {
           const idSuffix = script.id.slice(-6);
-          fileName = `${safeName}-${idSuffix}.user.js`;
+          fileName = `${safeName}-${idSuffix}${fileExt}`;
         }
         usedNames.add(fileName);
         const filePath = `${directory}/${fileName}`;
@@ -426,7 +532,7 @@ Reminder: Scripts must use an IIFE with named functions for symbol-level editing
       directory: z.string().optional().describe('Workspace directory for .dom.md files. Required if writeFiles is true.')
     },
     async ({ scriptId, writeFiles, directory }) => {
-      const result = await bridge.request('get_selected_elements', { scriptId }) as any;
+      const result = await bridge.dispatchTool('get_selected_elements', { scriptId }) as any;
 
       // Optionally write .dom.md files to workspace
       if (writeFiles && directory) {
@@ -530,7 +636,7 @@ Reminder: Scripts must use an IIFE with named functions for symbol-level editing
               '',
               `# ${sel.displayName || sel.tagName}`,
               '',
-              sel.userComment ? `> ${sel.userComment.replace(/\n/g, '\n> ')}` : '> _No user comment provided._',
+              sel.userComment ? `> ${sel.userComment.replace(/\\n/g, '\n> ')}` : '> _No user comment provided._',
               '',
               hasScreenshot ? `![Element screenshot](./${safeElName}.screenshot.png)` : '',
               '',
@@ -607,7 +713,7 @@ Reminder: Scripts must use an IIFE with named functions for symbol-level editing
       }
 
       // Write dom.md
-      const yq = (s: string) => `"${(s || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')}"`;
+      const yq = (s: string) => `"${(s || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\\n/g, '\\n')}"`;
       const bp = selection.bulletproofSelectors || {};
       const tierLines: string[] = [];
       if (bp.tier1_stableId) tierLines.push(`  tier1_stableId: ${yq(bp.tier1_stableId)}`);
@@ -648,99 +754,7 @@ Reminder: Scripts must use an IIFE with named functions for symbol-level editing
 /**
  * Register MCP Prompts and Resources.
  */
-export function registerPromptsAndResources(server: McpServer, bridge: ExtensionBridge): void {
-
-  // ─── Prompts ────────────────────────────────────────────────────────
-
-  server.prompt(
-    'create-userscript',
-    'Guided workflow for creating a new userscript. Provides a step-by-step prompt that helps the AI agent understand what the user needs and produce a working script.',
-    {
-      targetUrl: z.string().describe('The URL pattern the script should match (e.g., *://*.example.com/*)'),
-      goal: z.string().describe('What the script should accomplish')
-    },
-    async ({ targetUrl, goal }) => {
-      return {
-        messages: [
-          {
-            role: 'user' as const,
-            content: {
-              type: 'text' as const,
-              text: [
-                `Create a userscript for Customaise that does the following:`,
-                ``,
-                `**Target URL:** ${targetUrl}`,
-                `**Goal:** ${goal}`,
-                ``,
-                `## Requirements`,
-                `1. Include a proper metadata block with @name, @namespace, @match, @description, @version, and @grant directives`,
-                `2. Use \`// @namespace    https://customaise.com\``,
-                `3. Use @match ${targetUrl}`,
-                `4. CRITICAL: Wrap the script in an IIFE containing explicit, named top-level functions. Every distinct behavior MUST be a separate named function. Do NOT put logic inline. Customaise uses symbol-level editing (function-by-function) so this structure is mandatory.`,
-                `5. If making cross-origin requests, include the @connect directive`,
-                `6. Use GM_log for debug output (it appears in Customaise's console context)`,
-                `7. Handle edge cases (element not found, page still loading, etc.)`,
-                ``,
-                `## Workflow`,
-                `1. Use \`get_page_context\` to understand the page structure`,
-                `2. Write the script code to a file in the workspace directory (e.g., ./customaise-scripts/), NEVER to /tmp`,
-                `3. For targeting existing page elements, consider using \`VM_findElement\` with \`dom_*\` IDs from \`get_page_context\` for bulletproof selector resilience`,
-                `4. Use \`export_script\` to install it in Customaise (it will be validated through the sanitization pipeline)`,
-                `5. Use \`reload_tab\` to test it`,
-                `6. Use \`get_console_context\` to check for errors or GM_log output`,
-                `7. If there are issues, fix and re-export`,
-                ``,
-                `## Reference`,
-                `Read the \`customaise://conventions\` resource for the full API reference (22 GM_* APIs, metadata directives, and advanced patterns).`,
-              ].join('\n')
-            }
-          }
-        ]
-      };
-    }
-  );
-
-  server.prompt(
-    'debug-userscript',
-    'Debugging workflow for an existing userscript that isn\'t working as expected. Guides the AI through systematic diagnosis using available tools.',
-    {
-      scriptId: z.string().describe('The ID of the script to debug')
-    },
-    async ({ scriptId }) => {
-      return {
-        messages: [
-          {
-            role: 'user' as const,
-            content: {
-              type: 'text' as const,
-              text: [
-                `Debug the userscript with ID \`${scriptId}\`.`,
-                ``,
-                `## Debugging Steps`,
-                `1. Use \`import_script\` to pull the script to a local file for inspection`,
-                `2. Check if the script is enabled with \`list_scripts\``,
-                `3. Use \`list_tabs\` to find a tab matching the script's @match pattern`,
-                `4. Use \`reload_tab\` on that tab to trigger script injection`,
-                `5. Use \`get_console_context\` to capture errors and GM_log output`,
-                `6. Use \`get_page_context\` to verify the DOM state`,
-                `7. If needed, use \`take_screenshot\` to see the visual result`,
-                ``,
-                `## Common Issues`,
-                `- @match pattern doesn't match the current URL`,
-                `- @run-at timing: script runs before target elements exist`,
-                `- Missing @grant for GM_* or VM_* APIs used in the script`,
-                `- Missing @connect directive for cross-origin GM_xmlhttpRequest calls`,
-                `- CSP blocking inline script injection`,
-                `- Element selectors changed on the page`,
-                ``,
-                `Fix any issues found and use \`export_script\` to push updates.`,
-              ].join('\n')
-            }
-          }
-        ]
-      };
-    }
-  );
+export function registerPromptsAndResources(server: McpServer, bridge: Bridge): void {
 
   // ─── Resources ──────────────────────────────────────────────────────
 
@@ -752,7 +766,7 @@ export function registerPromptsAndResources(server: McpServer, bridge: Extension
       mimeType: 'application/json'
     },
     async (uri) => {
-      const result = await bridge.request('list_scripts', {});
+      const result = await bridge.dispatchTool('list_scripts', {});
       return {
         contents: [{
           uri: uri.href,
@@ -772,8 +786,7 @@ export function registerPromptsAndResources(server: McpServer, bridge: Extension
     },
     async (uri, variables) => {
       const scriptId = variables.scriptId as string;
-      // Reuse the import_script bridge command (same logic, avoids duplication)
-      const result = await bridge.request('import_script', { scriptId });
+      const result = await bridge.dispatchTool('import_script', { scriptId });
       return {
         contents: [{
           uri: uri.href,
@@ -788,7 +801,7 @@ export function registerPromptsAndResources(server: McpServer, bridge: Extension
     'conventions',
     'customaise://conventions',
     {
-      description: 'Userscript writing conventions and best practices for Customaise.',
+      description: 'Directory pointer for Customaise conventions.',
       mimeType: 'text/markdown'
     },
     async (uri) => {
@@ -796,17 +809,53 @@ export function registerPromptsAndResources(server: McpServer, bridge: Extension
         contents: [{
           uri: uri.href,
           mimeType: 'text/markdown',
-          text: CONVENTIONS_GUIDE
+          text: '> **Directory Redirect**\n> \n> Customaise supports two script paradigms with distinct architectures.\n> \n> - For traditional DOM manipulation, read `customaise://userscript-conventions`\n> - For WebMCP tool injection, read `customaise://agentscript-conventions`'
+        }]
+      };
+    }
+  );
+
+  server.resource(
+    'userscript-conventions',
+    'customaise://userscript-conventions',
+    {
+      description: 'Complete conventions, workflow, and API guide for building Customaise UserScripts.',
+      mimeType: 'text/markdown'
+    },
+    async (uri) => {
+      return {
+        contents: [{
+          uri: uri.href,
+          mimeType: 'text/markdown',
+          text: USERSCRIPT_CONVENTIONS
+        }]
+      };
+    }
+  );
+
+  server.resource(
+    'agentscript-conventions',
+    'customaise://agentscript-conventions',
+    {
+      description: 'Complete conventions, workflow, and API guide for building Customaise AgentScripts.',
+      mimeType: 'text/markdown'
+    },
+    async (uri) => {
+      return {
+        contents: [{
+          uri: uri.href,
+          mimeType: 'text/markdown',
+          text: AGENTSCRIPT_CONVENTIONS
         }]
       };
     }
   );
 }
 
-const CONVENTIONS_GUIDE = `# Customaise Userscript Conventions
+
+const USERSCRIPT_CONVENTIONS = `# Customaise UserScripts
 
 ## File Format & Structure
-
 Every userscript is a single \`.user.js\` file with a metadata block at the top. 
 **CRITICAL**: Customaise supports symbol-level editing (function-by-function). To enable this, your script MUST be wrapped in an IIFE containing **named functions**, rather than flat inline code.
 
@@ -842,7 +891,6 @@ Every userscript is a single \`.user.js\` file with a metadata block at the top.
 \`\`\`
 
 ## Metadata Directives
-
 | Directive | Required | Description |
 |-----------|----------|-------------|
 | \`@name\` | ✅ | Script name (must be unique) |
@@ -859,7 +907,6 @@ Every userscript is a single \`.user.js\` file with a metadata block at the top.
 | \`@author\` | Optional | Script author |
 
 ## VM_findElement (Bulletproof DOM Targeting)
-
 Customaise provides a revolutionary multi-tier selector API that guarantees 100% element targeting reliability, surviving UI redesigns and dynamic class changes.
 
 **Usage:**
@@ -871,57 +918,282 @@ Customaise provides a revolutionary multi-tier selector API that guarantees 100%
 **VM_findExternalElement:** Works like \`VM_findElement\` but targets elements inside cross-origin iframes. Requires \`@connect\` for the iframe's domain. Usage: \`await VM_findExternalElement('dom_ext_xxx')\`.
 
 ## Available GM_* APIs
-
-Customaise supports 22 \`GM_*\` APIs, making it highly compatible with existing Greasemonkey/Tampermonkey scripts. You can use either the classic \`GM_*\` (underscore) or modern \`GM.*\` (promise-based) syntax.
+Customaise supports 22 \`GM_*\` APIs. You can use either the classic \`GM_*\` (underscore) or modern \`GM.*\` (promise-based) syntax.
 
 ### Environment & Console
 | API | Description |
 |-----|-------------|
-| \`GM_log(msg)\` / \`GM.log(msg)\` | Log to Customaise console (visible via \`get_console_context\` tool) |
-| \`GM_info\` / \`GM.info\` | Object containing script metadata |
+| \`GM_log(msg)\` | Log to Customaise console (visible via \`get_console_context\` tool) |
+| \`GM_info\` | Object containing script metadata |
 
 ### Storage (Extension-Scoped)
 | API | Description |
 |-----|-------------|
-| \`GM_setValue(k, v)\` / \`GM.setValue(k, v)\` | Persistent storage (survives page reloads) |
-| \`GM_getValue(k, def)\` / \`GM.getValue(k, def)\` | Read from persistent storage |
-| \`GM_deleteValue(k)\` / \`GM.deleteValue(k)\` | Delete from persistent storage |
-| \`GM_listValues()\` / \`GM.listValues()\` | List all stored keys |
+| \`GM_setValue(k, v)\` | Persistent storage (survives page reloads) |
+| \`GM_getValue(k, def)\` | Read from persistent storage |
+| \`GM_deleteValue(k)\` | Delete from persistent storage |
+| \`GM_listValues()\` | List all stored keys |
 | \`GM_addValueChangeListener(name, cb)\` | Listen for storage changes across tabs |
 | \`GM_removeValueChangeListener(id)\` | Remove storage listener |
 
 ### DOM & UI
 | API | Description |
 |-----|-------------|
-| \`GM_addStyle(css)\` / \`GM.addStyle(css)\` | Inject CSS into the page |
-| \`GM_addElement(tag, attr)\` / \`GM.addElement(tag, attr)\` | Safely create and append DOM elements |
-| \`GM_registerMenuCommand(name, fn)\` | Add a command to the Customaise extension menu |
+| \`GM_addStyle(css)\` | Inject CSS into the page |
+| \`GM_addElement(tag, attr)\` | Safely create and append DOM elements |
+| \`GM_registerMenuCommand(name, fn)\` | Add a command to the extension menu |
 | \`GM_unregisterMenuCommand(id)\` | Remove a menu command |
-| \`GM_notification(details)\` / \`GM.notification(details)\` | Show a desktop OS notification |
+| \`GM_notification(details)\` | Show a desktop OS notification |
 
 ### Network & Resources
 | API | Description |
 |-----|-------------|
 | \`GM_xmlhttpRequest(details)\` | Cross-origin HTTP requests. **Requires \`@connect\` directive.** |
-| \`GM.xmlHttpRequest(details)\` | Promise-based cross-origin HTTP requests |
 | \`GM_download(details)\` | Download a file to disk |
-| \`GM_getResourceText(name)\` / \`GM.getResourceText(name)\` | Read text content from a \`@resource\` |
-| \`GM_getResourceURL(name)\` / \`GM.getResourceUrl(name)\` | Get base64 data URI for a \`@resource\` |
+| \`GM_getResourceText(name)\` | Read text content from a \`@resource\` |
+| \`GM_getResourceURL(name)\` | Get base64 data URI for a \`@resource\` |
 
 ### Tabs & System
 | API | Description |
 |-----|-------------|
-| \`GM_setClipboard(text)\` / \`GM.setClipboard(text)\` | Copy text to OS clipboard |
-| \`GM_openInTab(url, options)\` / \`GM.openInTab(url, options)\` | Open a new browser tab |
-| \`GM_getTab(cb)\` / \`GM.getTab()\` | Get persistent state for the current tab |
-| \`GM_saveTab(obj)\` / \`GM.saveTab(obj)\` | Save persistent state for the current tab |
-| \`GM_getTabs(cb)\` / \`GM.getTabs()\` | Get persistent state for all tabs running this script |
+| \`GM_setClipboard(text)\` | Copy text to OS clipboard |
+| \`GM_openInTab(url, options)\` | Open a new browser tab |
+| \`GM_getTab(cb)\` | Get persistent state for the current tab |
+| \`GM_saveTab(obj)\` | Save persistent state for the current tab |
+| \`GM_getTabs(cb)\` | Get persistent state for all tabs |
 
 ## Developer Workflow & Best Practices
-
 1. **Use \`GM_log\` over \`console.log\`:** \`GM_log\` output is explicitly tracked by Customaise and is visible when using the \`get_console_context\` MCP tool.
 2. **Cross-Origin Requests:** If your script needs to fetch data from \`api.github.com\`, you MUST include \`// @connect api.github.com\` in the metadata block, or \`GM_xmlhttpRequest\` will fail silently.
 3. **Handle Dynamic Pages:** Most modern sites are SPAs (Single Page Applications). Elements may not exist immediately. Use \`VM_findElement\` or \`MutationObserver\` instead of assuming elements are present on load.
 4. **Execution Timing:** \`// @run-at document-idle\` is the safest default as it ensures the initial DOM is fully parsed.
 `;
 
+const AGENTSCRIPT_CONVENTIONS = `# Customaise AgentScripts
+
+AgentScripts inject WebMCP tools onto any web page via \`navigator.modelContext\`.
+
+## Setup & environment
+
+**No Chrome flag required.** Customaise ships a polyfill of \`navigator.modelContext\` that runs on stable Chromium today. The Chrome \`#enable-webmcp-testing\` flag is OPTIONAL — it only matters if the user wants third-party WebMCP-spec inspector tools to introspect Customaise's tool registry. The Customaise stack itself (the in-extension AI, the IDE MCP bridge, every \`@webmcp\`-declared tool) works flag-off.
+
+**The "two browsers" mental model.** Customaise is intentionally split across two browsers:
+- **The user's daily Chrome** (or Edge / Brave / any Chromium) — where Customaise is installed, where the user is logged into the target sites (bank, CRM, internal Jira, etc.), where AgentScripts inject. This is where the "hands" live.
+- **The IDE running the agent** (Cursor, Claude Code, Windsurf, etc.) — where the agent's "brain" lives. The IDE's built-in browser is NOT where Customaise should run.
+
+The two communicate via a WebSocket on \`localhost:4050\` (the Customaise MCP server, spawned by the IDE's MCP client). The agent never sees the user's cookies or auth tokens — it just calls registered tools and the tools execute inside the user's authenticated session. This split is what unlocks "Bring Your Own Session" automation: any web app the user is already logged into becomes addressable, with no API keys, no OAuth dance, no scraping.
+
+**Prerequisites for the user (one-time).** They need:
+1. Customaise extension installed (Web Store or unpacked).
+2. If unpacked: \`chrome://extensions\` → Developer mode ON, plus the "Allow user scripts" toggle on Customaise's card.
+3. The global AgentScripts toggle in Customaise Settings → Script Management → ON. (Without this, every AgentScript is unregistered globally regardless of per-script enable state.)
+4. Whatever site they want to automate, opened and signed in normally.
+
+## Format Requirements
+1. MUST use the \`// ==AgentScript==\` metadata block (NOT UserScript).
+2. MUST declare each tool via \`// @webmcp <toolName> <permission>\` (permissions: allow, prompt, deny). Undeclared tools are denied by default.
+3. Top-level \`navigator.modelContext.registerTool()\` is **strongly recommended** (NOT enforced — IIFE-wrapped scripts also work). The reason: Customaise's in-browser AI editor performs **symbol-level edits** (function-by-function) only on functions that are addressable at the top level or inside a clearly-named IIFE structure with named functions. Flat anonymous code or deeply-nested anonymous arrows force the editor to fall back to **whole-script rewrite**, which is slower, more error-prone, and loses git-friendly diffs. If symbol-editability matters (it usually does for long-lived scripts), structure your code as named top-level functions referenced by your \`registerTool\` calls.
+
+\`\`\`javascript
+// ==AgentScript==
+// @name         GitHub Agent Actions
+// @namespace    https://customaise.com
+// @version      1.0.0
+// @match        https://github.com/*
+// @description  Exposes GitHub issues data to IDE agents via WebMCP tools
+// @webmcp       list_open_issues prompt
+// @grant        GM_log
+// @grant        GM_setValue
+// @grant        GM_getValue
+// ==/AgentScript==
+
+// AgentScripts execute in the MAIN world, but they CAN use GM_* APIs!
+// A built-in bridge automatically routes GM_* requests to the extension securely.
+const usageCount = await GM.getValue('usage_count', 0);
+await GM.setValue('usage_count', usageCount + 1);
+GM_log(\`AgentScript loaded. Usage count: \${usageCount + 1}\`);
+
+navigator.modelContext.registerTool({
+  name: "list_open_issues",
+  description: "Returns all open issues with titles and labels",
+  schema: { type: "object", properties: {} },
+  readOnlyHint: true, // Set to true if your tool does not mutate the page (defaults to false)
+  execute: async (args) => {
+    const issues = document.querySelectorAll('.js-issue-row');
+    return Array.from(issues).map(row => ({
+      title: row.querySelector('.Link--primary')?.textContent?.trim(),
+      labels: Array.from(row.querySelectorAll('.IssueLabel'))
+        .map(l => l.textContent?.trim())
+    }));
+  }
+});
+\`\`\`
+
+## Required Directives
+| Directive | Description |
+|-----------|-------------|
+| \`@webmcp\`  | **Mandatory.** Format: \`<toolName> <allow|prompt|deny>\`. Declares explicit permissions for each registered tool. |
+
+## Granular Tool Permissions
+- \`allow\` — Autonomous. Executes immediately without user confirmation.
+- \`prompt\` — Interactive. Triggers the Customaise UX asking for explicit user consent before execution.
+- \`deny\` — Blocked. Tool is suppressed and fails if called. All undeclared tools default to deny.
+
+### Consent gate timing (important when designing tools)
+Every \`navigator.modelContext.callTool(...)\` invocation — yours, the IDE MCP client's, the in-extension AI's, or any other in-page agent — round-trips to the extension service worker for permission evaluation **before** your \`execute\` body runs. Two practical consequences:
+- \`allow\` tools add ~50–100 ms latency per call. Fine for human-paced flows; avoid hot-loop calls.
+- \`prompt\` tools may **block for up to 5 minutes** while waiting on the user. Design tools so this is acceptable (no timing-sensitive logic between trigger and execute).
+
+The same gate enforces the same \`@webmcp\` policy across **every call path**, so a tool you mark \`prompt\` will reliably show the consent modal regardless of who invokes it. This is a guarantee you can rely on for security-sensitive operations.
+
+## Manual HITL Requests
+Even if your tool is granted the \`allow\` permission, you can dynamically invoke the Customaise consent modal inside an execute block:
+\`const consent = await navigator.modelContext.requestUserInteraction({ toolName: 'my_tool', reason: '...' });\`
+
+## GM_* API Support in MAIN World
+- AgentScripts execute in the browser's MAIN world so they can access \`navigator.modelContext\`.
+- **Customaise provides a secure, native MAIN world bridge for GM_* APIs.**
+- AgentScripts are executed contextually by Customaise, so **top-level await is fully supported**.
+- \`GM_setValue\`, \`GM_xmlhttpRequest\`, \`GM_log\`, etc., are fully supported.
+- You MUST explicitly include a \`@grant\` directive for each API you use, exactly like a UserScript.
+- \`unsafeWindow\` should NOT be used (it is redundant because you are already in the MAIN world).
+
+## Advanced Networking & Auth Interception
+You can use \`@run-at document-start\` to inject your AgentScript before the target page loads. 
+This allows you to patch \`window.fetch\` or \`XMLHttpRequest\` to capture bearer tokens or authentication headers. 
+You can then securely store them using \`GM_setValue\` and retrieve them using \`GM_getValue\` inside your WebMCP tool executions, enabling your AI agents to perform authenticated actions on behalf of the user.
+
+## AgentScript Workflow
+1. Use \`get_page_context\` to understand the page structure
+2. Identify areas of the page that would make good "read" tools (tables, lists, data)
+3. Identify forms/buttons that would make good "write" tools (interactive). For those, ensure \`readOnlyHint: false\`.
+4. Write the \`.agent.js\` code to a file in the workspace directory (e.g., ./customaise-scripts/), NEVER to /tmp.
+5. Use \`export_script\` to install it into Customaise. **Read the response \`warnings[]\` array** — silent issues like malformed \`@webmcp\` lines or tools registered without a matching \`@webmcp\` declaration are surfaced there. They will NOT be re-surfaced when the tool fails at call time.
+6. Use \`reload_tab\` on the target page so the AgentScript actually injects.
+7. Use \`list_webmcp_tools\` to verify your tools successfully registered on the page.
+8. Call them via \`call_webmcp_tool\`.
+
+## Patterns & Recipes — how to actually be productive
+
+The single biggest mental shift: **WebMCP turns the page into a REPL for you.** You aren't writing one big script that has to work first try. You build a small introspective tool, call it via \`call_webmcp_tool\`, observe the structured JSON, modify the script, re-export, call again. Tight loop. Throw the diagnostic tools away when done.
+
+### Recipe 1 — The "diagnostic tool" pattern (your single most important habit)
+Whenever you start work against a page you don't know well, your **first** AgentScript should be a no-op tool whose only job is to surface state.
+
+\`\`\`javascript
+// ==AgentScript==
+// @name        Page Inspector
+// @match       https://target.example.com/*
+// @webmcp      inspect_state allow
+// @grant       GM_log
+// @run-at      document-start
+// ==/AgentScript==
+
+const _captured = { posts: [], headers: {}, ready: false };
+
+const _origFetch = window.fetch;
+window.fetch = function (input, init) {
+  const url = typeof input === 'string' ? input : input?.url;
+  if (init?.method === 'POST' && url?.includes('/api/')) {
+    _captured.posts.push({ url, body: typeof init.body === 'string' ? init.body.slice(0, 300) : null });
+    if (init.headers) Object.assign(_captured.headers, init.headers);
+    _captured.ready = true;
+  }
+  return _origFetch.apply(this, arguments);
+};
+
+navigator.modelContext.registerTool({
+  name: 'inspect_state',
+  description: 'Returns intercepted POST endpoints and headers seen so far.',
+  schema: { type: 'object', properties: {} },
+  readOnlyHint: true,
+  execute: async () => ({ ..._captured, headerKeys: Object.keys(_captured.headers) }),
+});
+\`\`\`
+
+Now you can call \`inspect_state\` from your IDE after performing actions on the page — you'll see exactly what API endpoints exist, what headers carry auth, what payloads look like. **You couldn't do this without WebMCP**: a plain userscript could capture the same data but you'd have to dump it via \`GM_log\` and grep \`get_console_context\` for it. Round-trip too slow to iterate against.
+
+### Recipe 2 — Auth-interception → replay (the "BYO session" trick)
+When the target site has no public API but you want to drive it programmatically, the page's own authenticated requests are your API. Pattern:
+
+1. **Intercept at \`document-start\`** (so you catch the page's first requests):
+   \`\`\`javascript
+   // @run-at document-start
+   const captured = { headers: {} };
+   const origOpen = XMLHttpRequest.prototype.open;
+   const origSetHeader = XMLHttpRequest.prototype.setRequestHeader;
+   const origSend = XMLHttpRequest.prototype.send;
+   XMLHttpRequest.prototype.open = function (method, url) {
+     this._vmHeaders = {};
+     return origOpen.apply(this, arguments);
+   };
+   XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
+     if (this._vmHeaders) this._vmHeaders[name.toLowerCase()] = value;
+     return origSetHeader.apply(this, arguments);
+   };
+   XMLHttpRequest.prototype.send = function (body) {
+     if (this._vmHeaders && Object.keys(this._vmHeaders).length > 2) {
+       Object.assign(captured.headers, this._vmHeaders);
+     }
+     return origSend.apply(this, arguments);
+   };
+   \`\`\`
+2. **Surface what you've captured via a \`check_auth\` tool** (Recipe 1 pattern).
+3. **In your action tool, replay the captured headers** on a fresh XHR with your payload:
+   \`\`\`javascript
+   const xhr = new XMLHttpRequest();
+   xhr.open('POST', '/api/the/endpoint', true);
+   xhr.withCredentials = true;
+   xhr.setRequestHeader('Content-Type', 'application/json');
+   for (const [k, v] of Object.entries(captured.headers)) {
+     if (!['content-type', 'content-length'].includes(k)) {
+       try { xhr.setRequestHeader(k, v); } catch (_) {}
+     }
+   }
+   xhr.send(JSON.stringify(payload));
+   \`\`\`
+
+This pattern unlocks **any** web app that the user is logged into. No API keys, no OAuth dance, no scraping. The agent operates as the user, with the user's permission.
+
+### Recipe 3 — Capture-at-execute (don't capture-at-registration)
+SPAs change pages without reload. If you read \`document.title\` or any DOM state inside \`registerTool\` (or in module scope at script load), you'll be holding stale data. **Always read live state inside the \`execute\` body.** Wrong:
+\`\`\`javascript
+const currentPrice = parseFloat(document.title.match(/[\\d.]+/)[0]); // captured ONCE at script load
+navigator.modelContext.registerTool({ name: 'foo', execute: async () => ({ currentPrice }) });
+\`\`\`
+Right:
+\`\`\`javascript
+navigator.modelContext.registerTool({
+  name: 'foo',
+  execute: async () => ({ currentPrice: parseFloat(document.title.match(/[\\d.]+/)[0]) }),
+});
+\`\`\`
+
+### Recipe 4 — Iterate fast, expand state on each cycle
+When something doesn't work, **don't rewrite the action tool**. Add fields to your inspection tool's return value. Find the missing piece. Then fix the action. The diagnostic tool grows; the action tool stays focused.
+
+\`\`\`
+1. inspect_state shows: 0 captured POSTs → page hasn't done anything yet → user needs to click something
+2. inspect_state shows: 12 captured POSTs but no /api/order/place → wrong action triggered, look at page UI
+3. inspect_state shows: the right endpoint, but body has fields you didn't expect → copy the format
+4. action tool now succeeds
+\`\`\`
+
+Each iteration takes seconds because the inspect_state response is structured JSON delivered to you, not a string in a console somewhere.
+
+### Recipe 5 — \`prompt\` for anything with side effects, \`allow\` for reads
+Default to \`allow\` for tools that just observe. Use \`prompt\` for anything that mutates state (orders, posts, deletes, transfers). The user's consent is your safety harness — don't bypass it just because \`allow\` is more convenient. The 5-minute consent budget is generous; design tools assuming the user might take 30 seconds to read what you're about to do.
+
+### Recipe 6 — Throw away your diagnostic tools when shipping
+Once your action tool works, \`delete_script\` the inspector. Or move its tools to \`@webmcp inspect_state deny\` so they're not callable. Diagnostics in production = attack surface.
+
+## Troubleshooting — \`list_webmcp_tools\` returns empty after reload
+Walk these in order. Most common cause first:
+1. **Global AgentScripts gate is OFF.** Customaise has a master toggle in Settings → Script Management. If off, every AgentScript is unregistered globally, regardless of per-script enable state. Ask the user to enable it once (per browser profile).
+2. **\`@match\` doesn't actually match the URL.** Verify with \`list_tabs\` then compare the URL against your \`@match\` patterns. \`https://demo.example.com/*\` doesn't match \`http://...\` or a different subdomain.
+3. **The script is per-script-disabled.** Even with the global gate on, the per-script toggle in Customaise's Script Management UI must be on. \`list_scripts\` shows the \`enabled\` boolean.
+4. **Tab wasn't reloaded after export.** Manifest content scripts re-inject only on navigation. Call \`reload_tab\` explicitly.
+5. **Script body threw before \`registerTool\` ran.** Use \`get_console_context\` on the tab to look for early errors. Nothing after the throw runs, so your tools never registered.
+6. **\`@webmcp\` declarations are malformed and were silently stripped at parse time.** Re-read the \`webmcp[]\` field in the \`export_script\` response — if it's empty but you intended grants, fix the directive syntax (\`<toolName> <allow|prompt|deny>\`, single space, no extra tokens).
+7. **You called \`registerTool\` for a tool that isn't declared in any \`@webmcp\` line.** It registers in the page registry but is filtered from \`list_webmcp_tools\` and rejected at call time. Add the \`@webmcp\` line.
+`;
