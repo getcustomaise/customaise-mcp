@@ -1019,15 +1019,23 @@ export class ExtensionBridge implements Bridge {
       pending.resolve(ack.result);
     } else if (typeof ack.error_code === 'number') {
       // Extension refused with a typed JSON-RPC code (e.g.
-      // MCP_AUTH_REQUIRED, MCP_CAP_EXCEEDED). Rethrow as McpError so
-      // the SDK surfaces the right error shape to the IDE.
-      pending.reject(
-        new McpError(
-          ack.error_code,
-          ack.error || `Tool '${pending.tool}' refused by extension (code=${ack.error_code})`,
-          ack.error_data ?? undefined,
-        ),
+      // MCP_AUTH_REQUIRED, MCP_CAP_EXCEEDED). Use a plain Error with
+      // code/data attached rather than McpError. The SDK's McpError
+      // constructor prepends "MCP error <code>: " to .message, and
+      // the SDK's Server.handleRequest serializes err.message directly
+      // into the JSON-RPC response — then the client-side SDK
+      // reconstructs an McpError from that response, prepending the
+      // prefix a SECOND time. That double-prefix is purely cosmetic
+      // but it leaks into IDE error popups (Claude Code, Cursor, etc.)
+      // as "MCP error -32029: MCP error -32029: Daily MCP cap reached…".
+      // Throwing a plain Error keeps the message clean over the wire
+      // so the client wraps it exactly once.
+      const err: Error & { code?: number; data?: unknown } = new Error(
+        ack.error || `Tool '${pending.tool}' refused by extension (code=${ack.error_code})`,
       );
+      err.code = ack.error_code;
+      err.data = ack.error_data ?? undefined;
+      pending.reject(err);
     } else {
       pending.reject(new Error(ack.error || `Tool '${pending.tool}' failed in extension`));
     }

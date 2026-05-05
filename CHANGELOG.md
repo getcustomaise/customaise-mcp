@@ -2,6 +2,11 @@
 
 All notable changes to `@customaise/mcp` will be documented in this file.
 
+## [2.0.2] - 2026-05-05
+
+### Fixed
+- **Doubled error prefix in IDE error popups.** Cap-exceeded and other typed errors surfaced in IDEs as `MCP error -32029: MCP error -32029: Daily MCP cap reached…`. The MCP SDK's `McpError` constructor prepends `MCP error <code>:` to the underlying message; when the server threw an `McpError` and the SDK serialized `error.message` over the wire, the client-side SDK prepended the prefix a second time on receipt. The bridge now throws a plain `Error` with `code` and `data` attached so the prefix appears exactly once in IDE error popups.
+
 ## [2.0.1] - 2026-05-05
 
 ### Fixed
