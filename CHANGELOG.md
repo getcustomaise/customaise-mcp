@@ -2,6 +2,47 @@
 
 All notable changes to `@customaise/mcp` will be documented in this file.
 
+## [2.0.7] - 2026-05-28
+
+### Added
+- **`CM_promptAI` on-device AI conventions.** New `CM_promptAI` section in both UserScript and AgentScript conventions resources covers the full Phase 1.5 surface shipping alongside this release. When to reach for the user's local Gemini Nano model (Chrome 148+) instead of routing every prompt through the calling IDE agent. The `@grant CM_promptAI` declaration. The bare call (`await CM_promptAI(input, opts?)`) with options (`schema`, `system`, `temperature`, `topK`, `timeoutMs`, `signal`, `omitResponseConstraintInput`). The sub-method surface: `CM_promptAI.availability()`, `CM_promptAI.params()`, `CM_promptAI.warm()`, `CM_promptAI.session(opts?)`, `CM_promptAI.stream(input, opts?)`. The session-instance shape (`.prompt`, `.promptStream`, `.append`, `.clone`, `.measureContextUsage`, `.refresh`, `.destroy`). Multimodal input as a parts array carrying text + image (Blob / ImageBitmap / BufferSource / ArrayBuffer) + audio (Blob / BufferSource). Token-by-token streaming returned as `AsyncIterable<string>` consumed with `for await`. The per-part 4 MB size cap and 16-megapixel ImageBitmap pre-encode guard. The sampling-pair rule (`temperature` and `topK` both-or-neither). The 16-sessions-per-tab cap with 10-minute idle GC. The `'downloadprogress'` event channel via `EventTarget`. The 13 typed error codes (`PROMPT_AI_UNAVAILABLE`, `PROMPT_AI_TIMEOUT`, `PROMPT_AI_SCHEMA_UNSUPPORTED`, `PROMPT_AI_SCHEMA_VIOLATION`, `PROMPT_AI_BAD_INPUT`, `PROMPT_AI_ENCODING`, `PROMPT_AI_CONTEXT_OVERFLOW`, `PROMPT_AI_NETWORK`, `PROMPT_AI_SESSION_GONE`, `PROMPT_AI_SESSION_RECYCLED`, `PROMPT_AI_ABORTED`, `PROMPT_AI_CANCELLED`, `PROMPT_AI_FAILED`). The 25-second default timeout with a 28-second bridge ceiling. A structured-output example using `opts.schema`. The "use it for classification, summarisation, JSON extraction, image and audio description, short multi-turn dialogue. NOT for large code generation or multi-step reasoning" use-case guidance.
+- **`GM_cookie` sub-method documentation.** The `GM_cookie` entry now spells out the frozen-object shape (`.list` / `.set` / `.delete`), the `details` argument shape (mirroring `chrome.cookies.getAll`'s filter), the promise + Node-style callback dual-mode contract, and notes the `.store` method as a Firefox-container-specific Tampermonkey method that's stubbed and will reject on Chromium.
+- **Bulk storage entries** (`GM_setValues`, `GM_getValues`, `GM_deleteValues`) under the Storage table, marked Tampermonkey v5.3+ parity, with the right argument shapes (object for set, array-or-object for get with defaults, array for delete).
+- **`details` shapes for the previously-vague network and UI APIs.** `GM_xmlhttpRequest`, `GM_download`, `GM_notification`, `GM_setClipboard`, `GM_openInTab`, and `GM_getTab` / `GM_saveTab` / `GM_getTabs` now document every field IDE agents would otherwise have to guess (method, url, headers, data, responseType, timeout, onload + callbacks for the network APIs; title, image, highlight, silent, timeout, onclick, ondone for notification; active, insert, setParent for openInTab; the per-tab-vs-extension-wide storage distinction for the tab APIs).
+
+### Changed
+- **GM_* table count from 22 to 26.** Adding `GM_cookie` + the three bulk-storage entries brings the documented surface in line with the canonical `SUPPORTED_GRANTS` set in `extension/src/background/services/metadata-schema-normalizer.js`.
+- **CM_devtools error code list completed.** Adds `DEBUGGER_PERMISSION_NOT_GRANTED` and clarifies the semantic split with `DEVTOOLS_DISABLED_BY_USER`: the former is the rare "Chrome's `debugger` permission itself is revoked" failure (user fixes via extension reload), the latter is the common "Settings → Scripts → Chrome DevTools Access toggle is OFF" failure (user fixes by flipping the toggle).
+- **Paired with extension 1.2.7.** `MIN_EXTENSION_VERSION` stays at `1.2.3` (the v2-bridge-protocol floor, unchanged); the extension's `EXPECTED_MCP_VERSION` constants are bumped to `2.0.7` so the in-extension MCP status surface shows "current" for this release and "update available" for any 2.0.6 client still running.
+
+## [2.0.6] - 2026-05-22
+
+### Changed
+- **Public script API renamed `VM_` → `CM_`.** The conventions resources (`customaise://userscript-conventions`, `customaise://agentscript-conventions`) and tool guidance now reference `CM_findElement`, `CM_findExternalElement`, `CM_devtools`, and `CM_withDevtools`. Internal storage keys and wire identifiers are unchanged.
+- **`MIN_EXTENSION_VERSION` corrected to `1.2.3`** — the actual extension version that shipped the v2 bridge protocol. The previous `1.4.0` was a stale display string; it never gated the v2 handshake (which keys off `protocolVersion`), so functional behaviour is unchanged. It only affected the "update your extension" message shown to genuinely pre-v2 extensions, which now names the correct version.
+
+### Added
+- **Chrome DevTools access conventions.** New `CM_devtools` / `CM_withDevtools` section in both conventions resources: when CDP is the right tool, the `@grant CM_devtools` + `@devtools-justification` requirement, the per-session **Settings → Scripts → Chrome DevTools Access** toggle (off by default, resets every Chrome restart), session lifecycle, usage patterns, and the full error-code table.
+
+## [2.0.5] - 2026-05-15
+
+### Added
+- **`take_screenshot` full-page and any-tab capture.** New `fullPage` boolean captures the whole scrollable page in one image. The response now includes `width`, `height` (parsed from the PNG), `captureMode`, and `truncated`. Background and cross-window tabs are captured without stealing OS focus.
+
+### Changed
+- **`open_tab` opens in the background by default** (`active: false`). Pass `active: true` to bring the new tab to the foreground. Stops AI agents from snatching the user's current tab while building or testing scripts.
+- **`get_page_context` summary** reads `componentsSummary` and `overview.counts` for a richer DOM overview.
+
+## [2.0.4] - 2026-05-15
+
+### Added
+- **Claude Desktop `.mcpb` bundle.** New `mcp/mcpb/` build pipeline (manifest, `build.mjs`, README, icon) producing `customaise.mcpb`, so Claude Desktop users install the same bridge that Cursor, Claude Code, and Codex users get through their MCP configs.
+
+## [2.0.3] - 2026-05-13
+
+### Added
+- **AgentScript conventions: bare `navigator.modelContext` guidance.** New section in the `customaise://agentscript-conventions` resource telling AI agents to reference `navigator.modelContext` with the bare `navigator` identifier — never `globalThis.navigator.modelContext`, `window.navigator.modelContext`, or `self.navigator.modelContext`. Customaise wraps `navigator.modelContext` per-script with a function-scoped Proxy that enforces user-set Deny overrides, attributes tool-conflict signals to the right scriptId, and surfaces collisions through the Tool Conflict UI badge. Explicit-global lookups skip the lexical scope chain and hit the unwrapped browser navigator, bypassing those semantics. The section also documents a deliberate W3C spec deviation: the wrapper SWALLOWS the `InvalidStateError` throw on duplicate tool registration so multi-conflict UX surfaces all collisions in one pass — scripts that explicitly `try/catch` that error will never see it; rely on the Tool Conflict badge instead. No bridge code change; documentation-only.
+
 ## [2.0.2] - 2026-05-05
 
 ### Fixed

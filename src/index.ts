@@ -68,7 +68,7 @@ Customaise supports two distinct paradigms. Your structural formatting depends e
 When a user asks you to interact with specific page elements:
 1. **Check for manual selections:** Use \`get_selected_elements\`. The user may have explicitly clicked elements to target.
 2. **Check the workspace:** Look for \`.dom.md\` files in \`.customaise/dom-context/\` (auto-pushed when users select elements visually).
-3. If selections exist, use their \`domId\` values with Customaise's robust \`VM_findElement\` targeting API.
+3. If selections exist, use their \`domId\` values with Customaise's robust \`CM_findElement\` targeting API.
 4. If no selections exist, ask the user to select elements via the Customaise UI DOM Selector tool, or fall back to standard CSS selectors.
 `.trim();
 

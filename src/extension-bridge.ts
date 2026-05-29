@@ -72,7 +72,7 @@ const MCP_VERSION: string = (() => {
  * protocol changes. Currently matches the extension build that landed
  * the v2 bridge protocol (the "Free MCP with caps" milestone).
  */
-const MIN_EXTENSION_VERSION = '1.4.0';
+const MIN_EXTENSION_VERSION = '1.2.3'; // first extension version shipping the v2 bridge protocol
 
 /**
  * How long the server waits for an `init_session` frame after the

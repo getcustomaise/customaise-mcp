@@ -13,7 +13,7 @@ A clear description of what the bug is.
 - OS: [e.g. macOS 15, Windows 11, Ubuntu 24]
 - Node.js version: [e.g. 22.x]
 - IDE: [e.g. Cursor, Claude Code, Windsurf, Antigravity]
-- MCP package version: [e.g. 1.0.1]
+- MCP package version: [e.g. 2.0.7]
 
 **Steps to reproduce**
 1. Configure MCP server with `npx -y @customaise/mcp`

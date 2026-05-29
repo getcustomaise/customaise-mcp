@@ -40,18 +40,67 @@ import { FileWatcher } from './file-watcher.js';
  */
 export function registerTools(server: McpServer, bridge: Bridge, fileWatcher?: FileWatcher): void {
 
+  // ─── Master-gate detection (Round-33 follow-up) ─────────────────────
+  // The "Allow user scripts" toggle on chrome://extensions resets on every
+  // Chrome restart (Chromium design — security gate for chrome.userScripts
+  // API access). When off, every UserScript and AgentScript is snoozed
+  // globally, zero tools register on any tab, and the agent investigating
+  // "why no tools" typically spends N tool calls poking at the page before
+  // it discovers the gate. This helper queries the SW's SystemStatusService
+  // (via the new `get_system_status` MCP dispatch) and, when the gate is
+  // off, returns a user-facing instruction string the calling tool prepends
+  // to its response. Fail-open: any error → no warning, caller falls back
+  // to the regular response (don't spam false alarms on transient errors).
+  const GATE_WARNING_HEADER = (
+    `╔════════════════════════════════════════════════════════════════════╗\n` +
+    `║ ⚠️  ACTION REQUIRED — Customaise scripts are snoozing.             ║\n` +
+    `╚════════════════════════════════════════════════════════════════════╝\n` +
+    `\n` +
+    `The "Allow user scripts" master toggle on chrome://extensions is OFF.\n` +
+    `This toggle resets on every Chrome restart and silently disables every\n` +
+    `UserScript and AgentScript globally — including the test rig you just\n` +
+    `installed. Zero tools will register on any tab until it's re-enabled.\n` +
+    `\n` +
+    `TELL THE USER: open chrome://extensions, enable "Developer mode" (top-\n` +
+    `right toggle), find the Customaise card, and toggle "Allow user scripts"\n` +
+    `ON. Then reload the target tab. The scripts will wake up automatically.\n` +
+    `\n` +
+    `(The structured response below is included for reference; until the\n` +
+    `toggle is on it will report 0 active tools regardless of script state.)\n` +
+    `\n` +
+    `────────────────────────────────────────────────────────────────────\n\n`
+  );
+  async function checkUserScriptsGate(): Promise<{ disabled: boolean; warning: string }> {
+    try {
+      const status = await bridge.dispatchTool('get_system_status', {}) as {
+        userScriptsDisabled?: boolean;
+        available?: boolean;
+      };
+      if (status && status.available && status.userScriptsDisabled) {
+        return { disabled: true, warning: GATE_WARNING_HEADER };
+      }
+    } catch {
+      // Fail-open — see helper comment.
+    }
+    return { disabled: false, warning: '' };
+  }
+
   // ─── Script Lifecycle ───────────────────────────────────────────────
 
   server.tool(
     'list_scripts',
-    'List all scripts (UserScripts & AgentScripts) installed in Customaise with their IDs, names, enabled status, match patterns, and whether they are shared (subscribed). Scripts marked isShared are read-only subscriptions — they cannot be imported, exported, edited, or deleted via MCP. To modify a shared script, the user must fork it from the extension UI.',
+    'List all scripts (UserScripts & AgentScripts) installed in Customaise with their IDs, names, enabled status, match patterns, and whether they are shared (subscribed). Scripts marked isShared are read-only subscriptions — they cannot be imported, exported, or deleted directly. To edit a shared script, call import_script with fork:true (creates an independent editable copy). To uninstall a shared script, the user must unsubscribe from the extension UI.',
     {},
+    { title: 'List scripts', readOnlyHint: true, openWorldHint: false },
     async () => {
-      const result = await bridge.dispatchTool('list_scripts', {});
+      const [result, gate] = await Promise.all([
+        bridge.dispatchTool('list_scripts', {}),
+        checkUserScriptsGate()
+      ]);
       return {
         content: [{
           type: 'text' as const,
-          text: JSON.stringify(result, null, 2)
+          text: gate.warning + JSON.stringify(result, null, 2)
         }]
       };
     }
@@ -59,21 +108,74 @@ export function registerTools(server: McpServer, bridge: Bridge, fileWatcher?: F
 
   server.tool(
     'import_script',
-    'Import an existing script (UserScript or AgentScript) from Customaise to a local file for editing. The file will include the full source code with metadata block. After editing the file with your IDE tools, use export_script to push changes back to Customaise. NOTE: Shared/subscribed scripts cannot be imported — they are read-only. The user must fork them from the extension UI first. IMPORTANT: Save files inside your current workspace or project directory (e.g., ./customaise-scripts/), never in /tmp.',
+    `Import a Customaise script (UserScript or AgentScript) to a local file for editing. The file contains the full source with metadata block. After editing with your IDE tools, use export_script to push changes back.
+
+Optional 'fork' flag (default false): when set to true, the script is FORKED into a new independent local copy BEFORE import, and the FORK is what gets written to the file. ALWAYS creates a new script — symmetric across source types, never a silent no-op:
+  - Subscribed/shared sources: "Fork" verb. Clears the subscription link (no more publisher updates), captures forkedFrom lineage so a later publish can render "Forked from <original>" on the marketplace.
+  - Owned sources: "Duplicate" verb. Clears publishedShareId so the dup isn't tied to the original's published listing. Use when you want a remix while keeping the original intact.
+Forked/duplicated scripts land DISABLED in the user's library (D10 trust ceremony). The returned scriptId is the NEW script (not the original); the agent can immediately export back to it.
+
+Without 'fork', subscribed scripts cannot be imported — they're read-only and the call refuses with a clear error pointing at fork:true. Owned scripts import normally (edit-in-place workflow).
+
+IMPORTANT: Save files inside your current workspace or project directory (e.g., ./customaise-scripts/), never in /tmp.`,
     {
-      scriptId: z.string().describe('The ID of the script to import (get from list_scripts)'),
-      filePath: z.string().describe('Local file path inside your workspace to write the script to (e.g., ./customaise-scripts/my-script.agent.js). Do NOT use /tmp.')
+      scriptId: z.string().describe('The ID of the script to import (get from list_scripts). When fork=true, this is the source script to fork from; the returned scriptId is the new fork.'),
+      filePath: z.string().describe('Local file path inside your workspace to write the script to (e.g., ./customaise-scripts/my-script.agent.js). Do NOT use /tmp.'),
+      fork: z.boolean().optional().describe('When true, fork the script into a new editable copy and import THAT copy. Always creates a new script (Fork for shared sources, Duplicate for owned). Required for subscribed/shared scripts. Default false.')
     },
-    async ({ scriptId, filePath }) => {
-      const result = await bridge.dispatchTool('import_script', { scriptId }) as {
+    // readOnlyHint:false because fork=true creates a new script (state-mutating);
+    // the hint applies to the tool surface, not per-invocation.
+    { title: 'Import script', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    async ({ scriptId, filePath, fork }) => {
+      // Fork branch — dispatch fork_script first; the new scriptId
+      // is what we hand to the import dispatch below. SW handler
+      // mirrors the extension UI's Fork helper (identity-clearing,
+      // unique-name, D9 lineage when shared, D10 disabled-by-default).
+      let effectiveScriptId = scriptId;
+      interface ForkOutcome {
+        success: boolean;
+        scriptId: string;
+        name: string;
+        scriptType?: string;
+        wasShared?: boolean;
+        wasPublished?: boolean;
+        forkedFrom?: unknown;
+      }
+      let forkOutcome: ForkOutcome | null = null;
+      if (fork === true) {
+        forkOutcome = await bridge.dispatchTool('fork_script', { scriptId }) as ForkOutcome;
+        effectiveScriptId = forkOutcome.scriptId;
+      }
+
+      const result = await bridge.dispatchTool('import_script', { scriptId: effectiveScriptId }) as {
         scriptId: string;
         source: string;
         metadata: Record<string, unknown>;
       };
 
-      // Ensure directory exists and write file
-      mkdirSync(dirname(filePath), { recursive: true });
-      writeFileSync(filePath, result.source, 'utf-8');
+      // File-write atomicity. If we just forked and the import
+      // succeeded but the local file-write fails (disk full,
+      // permission denied, invalid path), the fork is durable in
+      // the user's library but the agent gets an exception with no
+      // path forward. Surface the fork's scriptId in the error so
+      // the agent knows it CAN re-call import_script with that
+      // scriptId (and no `fork` flag) to retry just the file-write
+      // step — no second fork created.
+      try {
+        mkdirSync(dirname(filePath), { recursive: true });
+        writeFileSync(filePath, result.source, 'utf-8');
+      } catch (fsErr) {
+        const msg = (fsErr as Error)?.message || String(fsErr);
+        if (forkOutcome) {
+          throw new Error(
+            `Fork created (scriptId: ${forkOutcome.scriptId}, name: "${forkOutcome.name}") ` +
+            `but file-write to ${filePath} failed: ${msg}. ` +
+            `To recover: call import_script again with scriptId: "${forkOutcome.scriptId}" ` +
+            `(no fork option) to write the file. The fork itself is durable.`,
+          );
+        }
+        throw fsErr;
+      }
 
       return {
         content: [{
@@ -83,7 +185,15 @@ export function registerTools(server: McpServer, bridge: Bridge, fileWatcher?: F
             filePath,
             scriptId: result.scriptId,
             metadata: result.metadata,
-            bytesWritten: Buffer.byteLength(result.source, 'utf-8')
+            bytesWritten: Buffer.byteLength(result.source, 'utf-8'),
+            ...(forkOutcome ? {
+              forked: true,
+              originalScriptId: scriptId,
+              forkVerb: forkOutcome.wasShared ? 'Fork' : 'Duplicate',
+              forkedFrom: forkOutcome.forkedFrom ?? null,
+              newScriptName: forkOutcome.name,
+              note: 'Forked/duplicated script lands DISABLED. User reviews + enables explicitly per the D10 trust ceremony.',
+            } : {}),
           }, null, 2)
         }]
       };
@@ -92,7 +202,7 @@ export function registerTools(server: McpServer, bridge: Bridge, fileWatcher?: F
 
   server.tool(
     'export_script',
-    `Export a script from a local file into Customaise. The file will be validated through Customaise's sanitization pipeline (syntax checking, AST validation, security analysis). If valid, the script is installed and ready to execute on matching pages. If invalid, detailed diagnostics explain exactly what to fix. Pass scriptId to update an existing script instead of creating a new one. NOTE: You cannot overwrite a shared/subscribed script — they are read-only.
+    `Export a script from a local file into Customaise. The file will be validated through Customaise's sanitization pipeline (syntax checking, AST validation, security analysis). If valid, the script is installed and ready to execute on matching pages. If invalid, detailed diagnostics explain exactly what to fix. Pass scriptId to update an existing script instead of creating a new one. NOTE: You cannot overwrite a shared/subscribed script — they are read-only. If you need to edit a shared script, first call import_script with fork:true (creates an editable independent copy), then export to that copy's scriptId.
 
     Reminder for UserScripts: Must use an IIFE with named functions for symbol-level editing, \`// @namespace https://customaise.com\`, and standard directives (@name, @match, @grant).
     Reminder for AgentScripts: MUST use \`// ==AgentScript==\` block, MUST explicitly declare tools via \`// @webmcp <toolName> <permission>\` (e.g. \`// @webmcp my_tool prompt\`). Permissions: allow (autonomous), prompt (interactive), deny (blocked). Must NOT use IIFEs. CAN use GM_* APIs for persistence, networking, and observability alongside \`navigator.modelContext.registerTool()\`.`,
@@ -100,13 +210,17 @@ export function registerTools(server: McpServer, bridge: Bridge, fileWatcher?: F
       filePath: z.string().describe('Local file path containing the userscript source code'),
       scriptId: z.string().optional().describe('ID of an existing script to update. Omit to create a new script.')
     },
+    { title: 'Export script', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     async ({ filePath, scriptId }) => {
       const code = readFileSync(filePath, 'utf-8');
-      const result = await bridge.dispatchTool('export_script', { code, scriptId });
+      const [result, gate] = await Promise.all([
+        bridge.dispatchTool('export_script', { code, scriptId }),
+        checkUserScriptsGate()
+      ]);
       return {
         content: [{
           type: 'text' as const,
-          text: JSON.stringify(result, null, 2)
+          text: gate.warning + JSON.stringify(result, null, 2)
         }]
       };
     }
@@ -116,10 +230,11 @@ export function registerTools(server: McpServer, bridge: Bridge, fileWatcher?: F
 
   server.tool(
     'delete_script',
-    'Permanently delete a script (UserScript or AgentScript) from Customaise. This action cannot be undone. NOTE: Shared/subscribed scripts cannot be deleted via MCP — the user must unsubscribe from the extension UI.',
+    'Permanently delete a script (UserScript or AgentScript) from Customaise. This action cannot be undone. NOTE: Shared/subscribed scripts cannot be deleted via MCP — the user must unsubscribe from the extension UI. Forks created via import_script(fork:true) are owned scripts and CAN be deleted via MCP.',
     {
       scriptId: z.string().describe('The ID of the script to delete')
     },
+    { title: 'Delete script', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     async ({ scriptId }) => {
       const result = await bridge.dispatchTool('delete_script', { scriptId });
       return {
@@ -138,6 +253,7 @@ export function registerTools(server: McpServer, bridge: Bridge, fileWatcher?: F
       scriptId: z.string().describe('The ID of the script to enable/disable'),
       enabled: z.boolean().describe('true to enable, false to disable')
     },
+    { title: 'Toggle script', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     async ({ scriptId, enabled }) => {
       const result = await bridge.dispatchTool('set_script_enabled', { scriptId, enabled });
       return {
@@ -161,6 +277,7 @@ export function registerTools(server: McpServer, bridge: Bridge, fileWatcher?: F
     {
       tabId: z.number().optional().describe('Tab ID to inspect. Defaults to the active tab.')
     },
+    { title: 'Get page context', readOnlyHint: true, openWorldHint: true },
     async ({ tabId }) => {
       const result = await bridge.dispatchTool('get_page_context', { tabId }) as Record<string, any>;
 
@@ -175,23 +292,46 @@ export function registerTools(server: McpServer, bridge: Bridge, fileWatcher?: F
       const fullJson = JSON.stringify(result, null, 2);
       writeFileSync(filePath, fullJson, 'utf-8');
 
-      // Build lightweight summary for the agent's context window
-      const url = result.url || '';
-      const title = result.title || '';
-      const elementCount = result.dom?.elementCount
-        ?? result.elementCount
-        ?? (typeof result.dom === 'object' ? JSON.stringify(result.dom).length : 0);
+      // Build lightweight summary for the agent's context window.
+      // The extension's page-context-runtime returns componentsSummary
+      // (buttons/forms/tables/links/inputs/headers/images/modals with
+      // counts + sample selectors) and overview.counts. The legacy
+      // `result.dom.elementCount` field does not exist; reading from
+      // the real fields is the fix for the "elementCount: 0" bug.
+      const overview = result.overview || {};
+      const summary = result.componentsSummary || {};
+      const counts = overview.counts || {};
       const fileSizeKB = (Buffer.byteLength(fullJson, 'utf-8') / 1024).toFixed(1);
+
+      const componentLine = (name: string, entry: any): string | null =>
+        entry?.count
+          ? `${name}: ${entry.count}${
+              entry.samples?.length
+                ? ` (e.g. ${entry.samples.slice(0, 3).join(', ')})`
+                : ''
+            }`
+          : null;
 
       return {
         content: [{
           type: 'text' as const,
           text: JSON.stringify({
-            url,
-            title,
+            url: overview.url ?? result.url ?? '',
+            title: overview.title ?? result.title ?? '',
+            detailTier: overview.detailTier,
             filePath,
             fileSizeKB: `${fileSizeKB} KB`,
-            elementCount,
+            components: [
+              componentLine('buttons', summary.buttons),
+              componentLine('forms', summary.forms),
+              componentLine('tables', summary.tables),
+              componentLine('inputs', summary.inputs),
+              componentLine('headers', summary.headers),
+              componentLine('images', summary.images),
+              componentLine('modals', summary.modals),
+              summary.links?.count ? `links: ${summary.links.count}` : null
+            ].filter(Boolean),
+            domCounts: counts,
             hint: 'Full DOM snapshot saved to the file above. Use view_file or grep_search to inspect specific elements, selectors, or text content without loading the entire snapshot.'
           }, null, 2)
         }]
@@ -206,6 +346,7 @@ export function registerTools(server: McpServer, bridge: Bridge, fileWatcher?: F
       tabId: z.number().optional().describe('Tab ID to get logs from. Defaults to the active tab.'),
       level: z.enum(['all', 'error', 'warn', 'info', 'debug']).optional().describe('Filter by log level. Default: all')
     },
+    { title: 'Get console context', readOnlyHint: true, openWorldHint: true },
     async ({ tabId, level }) => {
       const result = await bridge.dispatchTool('get_console_context', { tabId }) as {
         errors?: Array<Record<string, unknown>>;
@@ -271,6 +412,7 @@ export function registerTools(server: McpServer, bridge: Bridge, fileWatcher?: F
     'list_tabs',
     'List all open browser tabs with their IDs, URLs, titles, and active status. Use to find a specific tab ID for other tools like reload_tab or take_screenshot.',
     {},
+    { title: 'List tabs', readOnlyHint: true, openWorldHint: true },
     async () => {
       const result = await bridge.dispatchTool('list_tabs', {});
       return {
@@ -284,11 +426,12 @@ export function registerTools(server: McpServer, bridge: Bridge, fileWatcher?: F
 
   server.tool(
     'open_tab',
-    'Open a new browser tab with the specified URL. Returns the new tab ID.',
+    'Open a new browser tab with the specified URL. Defaults to opening in the background so the user is not snatched away from the tab they are currently viewing. Returns the new tab ID.',
     {
       url: z.string().describe('The URL to open in the new tab'),
-      active: z.boolean().optional().describe('Whether the new tab should become the active tab. Defaults to true.')
+      active: z.boolean().optional().describe('Whether the new tab should become the active tab. Defaults to false (opens in background). Set to true only when the agent genuinely needs the new tab brought to focus.')
     },
+    { title: 'Open tab', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     async ({ url, active }) => {
       const result = await bridge.dispatchTool('open_tab', { url, active });
       return {
@@ -306,6 +449,7 @@ export function registerTools(server: McpServer, bridge: Bridge, fileWatcher?: F
     {
       tabId: z.number().optional().describe('The ID of the tab to close')
     },
+    { title: 'Close tab', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     async ({ tabId }) => {
       const result = await bridge.dispatchTool('close_tab', { tabId });
       return {
@@ -323,6 +467,7 @@ export function registerTools(server: McpServer, bridge: Bridge, fileWatcher?: F
     {
       tabId: z.number().describe('The ID of the tab to focus')
     },
+    { title: 'Focus tab', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     async ({ tabId }) => {
       const result = await bridge.dispatchTool('focus_tab', { tabId });
       return {
@@ -340,16 +485,20 @@ export function registerTools(server: McpServer, bridge: Bridge, fileWatcher?: F
     {
       tabId: z.number().optional().describe('Tab ID to reload. Defaults to the active tab.')
     },
+    { title: 'Reload tab', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     async ({ tabId }) => {
       // The bridge handler auto-detects WebMCP tabs and waits event-driven.
       // No client-side polling needed — plain userscript tabs return immediately,
       // AgentScript tabs auto-wait for tool re-registration.
-      const result = await bridge.dispatchTool('reload_tab', { tabId });
+      const [result, gate] = await Promise.all([
+        bridge.dispatchTool('reload_tab', { tabId }),
+        checkUserScriptsGate()
+      ]);
 
       return {
         content: [{
           type: 'text' as const,
-          text: JSON.stringify(result, null, 2)
+          text: gate.warning + JSON.stringify(result, null, 2)
         }]
       };
     }
@@ -357,16 +506,20 @@ export function registerTools(server: McpServer, bridge: Bridge, fileWatcher?: F
 
   server.tool(
     'take_screenshot',
-    'Capture a screenshot of the current visible browser tab. Use to verify visual changes made by userscripts. The screenshot is saved as a PNG file.',
+    'Capture a screenshot of a browser tab without stealing focus from the user. Defaults to the visible viewport. Set fullPage: true to capture the entire scrollable page as one tall image. The screenshot is saved as a PNG file. For background tabs and full-page captures, Chrome briefly displays its standard yellow developer-tools notice at the top of the target tab during capture; it clears automatically when capture completes (typically under one second).',
     {
       tabId: z.number().optional().describe('Tab ID to screenshot. Defaults to the active tab.'),
-      filePath: z.string().optional().describe('Local file path to save the screenshot. Auto-generates a temp path if omitted.')
+      filePath: z.string().optional().describe('Local file path to save the screenshot. Auto-generates a temp path if omitted.'),
+      fullPage: z.boolean().optional().describe('If true, capture the entire scrollable page (single tall PNG). If false or omitted, capture the visible viewport only.')
     },
-    async ({ tabId, filePath }) => {
-      const result = await bridge.dispatchTool('take_screenshot', { tabId }) as {
+    { title: 'Take screenshot', readOnlyHint: true, openWorldHint: true },
+    async ({ tabId, filePath, fullPage }) => {
+      const result = await bridge.dispatchTool('take_screenshot', { tabId, fullPage }) as {
         dataUrl: string;
         width?: number;
         height?: number;
+        captureMode?: string;
+        truncated?: boolean;
       };
 
       // Write base64 PNG data to file
@@ -382,7 +535,9 @@ export function registerTools(server: McpServer, bridge: Bridge, fileWatcher?: F
             success: true,
             filePath: savePath,
             width: result.width,
-            height: result.height
+            height: result.height,
+            captureMode: result.captureMode,
+            truncated: result.truncated
           }, null, 2)
         }]
       };
@@ -396,6 +551,7 @@ export function registerTools(server: McpServer, bridge: Bridge, fileWatcher?: F
       tabId: z.number().optional().describe('Tab ID to toggle UI on. Defaults to the active tab.'),
       panel: z.string().optional().describe('Panel to open: "scripts", "chat", "settings"')
     },
+    { title: 'Toggle UI', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     async ({ tabId, panel }) => {
       const result = await bridge.dispatchTool('show_ui', { tabId, panel });
       return {
@@ -414,12 +570,16 @@ export function registerTools(server: McpServer, bridge: Bridge, fileWatcher?: F
     {
       tabId: z.number().optional().describe('Tab ID to query. Defaults to the active tab.')
     },
+    { title: 'List WebMCP tools', readOnlyHint: true, openWorldHint: true },
     async ({ tabId }) => {
-      const result = await bridge.dispatchTool('list_webmcp_tools', { tabId });
+      const [result, gate] = await Promise.all([
+        bridge.dispatchTool('list_webmcp_tools', { tabId }),
+        checkUserScriptsGate()
+      ]);
       return {
         content: [{
           type: 'text' as const,
-          text: JSON.stringify(result, null, 2)
+          text: gate.warning + JSON.stringify(result, null, 2)
         }]
       };
     }
@@ -433,12 +593,18 @@ export function registerTools(server: McpServer, bridge: Bridge, fileWatcher?: F
       toolName: z.string().describe('The EXACT name of the WebMCP tool to invoke'),
       toolArgs: z.record(z.any()).optional().describe('JSON object of arguments for the tool')
     },
+    { title: 'Call WebMCP tool', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     async ({ tabId, toolName, toolArgs }) => {
+      // Gate check FIRST. call_webmcp_tool against a snoozing extension
+      // will error with "tool not registered" — surfacing the gate here
+      // tells the agent why the error is happening BEFORE the dispatch
+      // returns its no-such-tool failure.
+      const gate = await checkUserScriptsGate();
       const result = await bridge.dispatchTool('call_webmcp_tool', { tabId, toolName, toolArgs });
       return {
         content: [{
           type: 'text' as const,
-          text: JSON.stringify(result, null, 2)
+          text: gate.warning + JSON.stringify(result, null, 2)
         }]
       };
     }
@@ -452,6 +618,7 @@ export function registerTools(server: McpServer, bridge: Bridge, fileWatcher?: F
     {
       directory: z.string().describe('Local directory to export scripts to (e.g., ./customaise-scripts/)')
     },
+    { title: 'Sync scripts to workspace', readOnlyHint: true, openWorldHint: false },
     async ({ directory }) => {
       // Get all scripts with code
       const scripts = await bridge.dispatchTool('list_scripts_with_code', {}) as Array<{
@@ -525,12 +692,13 @@ export function registerTools(server: McpServer, bridge: Bridge, fileWatcher?: F
 
   server.tool(
     'get_selected_elements',
-    'Get DOM elements that the user has visually selected in the browser for a specific script. Returns each selection\'s bulletproof selectors, element context, and user comments. Use VM_findElement with the domId for precise targeting in scripts. When MCP is connected, .dom.md context files and screenshots are automatically pushed to the workspace (.customaise/dom-context/<script-name>/) in real-time as the user selects elements. Use this tool to retrieve selections if the auto-pushed files are missing or to get the raw JSON data.',
+    'Get DOM elements that the user has visually selected in the browser for a specific script. Returns each selection\'s bulletproof selectors, element context, and user comments. Use CM_findElement with the domId for precise targeting in scripts. When MCP is connected, .dom.md context files and screenshots are automatically pushed to the workspace (.customaise/dom-context/<script-name>/) in real-time as the user selects elements. Use this tool to retrieve selections if the auto-pushed files are missing or to get the raw JSON data.',
     {
       scriptId: z.string().optional().describe('Script ID to get selections for. Omit to get all scripts\' selections.'),
       writeFiles: z.boolean().optional().describe('If true, writes .dom.md context files to the workspace directory. Default: false.'),
       directory: z.string().optional().describe('Workspace directory for .dom.md files. Required if writeFiles is true.')
     },
+    { title: 'Get selected elements', readOnlyHint: true, openWorldHint: false },
     async ({ scriptId, writeFiles, directory }) => {
       const result = await bridge.dispatchTool('get_selected_elements', { scriptId }) as any;
 
@@ -640,9 +808,9 @@ export function registerTools(server: McpServer, bridge: Bridge, fileWatcher?: F
               '',
               hasScreenshot ? `![Element screenshot](./${safeElName}.screenshot.png)` : '',
               '',
-              '## VM_findElement Usage',
+              '## CM_findElement Usage',
               '```js',
-              `const element = await VM_findElement('${sel.domId}');`,
+              `const element = await CM_findElement('${sel.domId}');`,
               '```',
               ''
             ].filter(Boolean).join('\n');
@@ -867,7 +1035,7 @@ Every userscript is a single \`.user.js\` file with a metadata block at the top.
 // @match       https://example.com/*
 // @version     1.0
 // @grant       GM_log
-// @grant       VM_findElement
+// @grant       CM_findElement
 // @run-at      document-idle
 // ==/UserScript==
 
@@ -881,8 +1049,8 @@ Every userscript is a single \`.user.js\` file with a metadata block at the top.
   }
 
   async function hideAnnoyingBanner() {
-    // VM_findElement is our bulletproof DOM selector
-    const banner = await VM_findElement('dom_banner_123');
+    // CM_findElement is our bulletproof DOM selector
+    const banner = await CM_findElement('dom_banner_123');
     if (banner) banner.style.display = 'none';
   }
 
@@ -897,28 +1065,244 @@ Every userscript is a single \`.user.js\` file with a metadata block at the top.
 | \`@match\` | ✅ | URL pattern(s) where the script runs (\`*://*.example.com/*\`) |
 | \`@description\` | Recommended | What the script does |
 | \`@version\` | Recommended | Semantic version (defaults to 1.0) |
-| \`@grant\` | Optional | GM_* or VM_* APIs to enable (use \`none\` for no special APIs) |
+| \`@grant\` | Optional | GM_* or CM_* APIs to enable (use \`none\` for no special APIs) |
 | \`@run-at\` | Optional | When to inject: \`document-start\`, \`document-end\`, \`document-idle\` (default) |
 | \`@connect\` | Optional | Domains allowed for \`GM_xmlhttpRequest\` (e.g., \`api.github.com\`) |
-| \`@domId\` | Auto | Auto-managed by Customaise for \`VM_findElement\`. **Do not edit manually.** |
+| \`@domId\` | Auto | Auto-managed by Customaise for \`CM_findElement\`. **Do not edit manually.** |
 | \`@require\` | Optional | External JS libraries to load before the script |
 | \`@resource\` | Optional | Named external resources (CSS, JSON, images) accessible via \`GM_getResourceText/URL\` |
 | \`@namespace\` | Recommended | Script namespace. Use \`https://customaise.com\`. |
 | \`@author\` | Optional | Script author |
 
-## VM_findElement (Bulletproof DOM Targeting)
+## CM_findElement (Bulletproof DOM Targeting)
 Customaise provides a revolutionary multi-tier selector API that guarantees 100% element targeting reliability, surviving UI redesigns and dynamic class changes.
 
 **Usage:**
-1. You must declare \`@grant VM_findElement\`
-2. Pass a \`dom_*\` ID string (e.g., \`await VM_findElement('dom_1234567890_abc')\`)
+1. You must declare \`@grant CM_findElement\`
+2. Pass a \`dom_*\` ID string (e.g., \`await CM_findElement('dom_1234567890_abc')\`)
 3. **Important:** \`dom_*\` IDs are generated by the user using the Customaise DOM selector tooltip. Do not invent your own \`dom_*\` IDs. If creating elements dynamically, use standard \`document.querySelector\`.
 4. The function is async and must be awaited.
 
-**VM_findExternalElement:** Works like \`VM_findElement\` but targets elements inside cross-origin iframes. Requires \`@connect\` for the iframe's domain. Usage: \`await VM_findExternalElement('dom_ext_xxx')\`.
+**CM_findExternalElement:** Works like \`CM_findElement\` but targets elements inside cross-origin iframes. Requires \`@connect\` for the iframe's domain. Usage: \`await CM_findExternalElement('dom_ext_xxx')\`.
+
+## CM_promptAI (On-Device AI / Gemini Nano)
+
+Run Chrome's built-in Prompt API (on-device Gemini Nano) from your script. Runs on-device: no API key, no cost, no server round-trip, works offline once the model is provisioned. Chrome desktop only (the model is not present on Android/iOS or other browsers), so always feature-detect.
+
+Declare \`// @grant CM_promptAI\`.
+
+### Capability probe
+
+- \`await CM_promptAI.availability()\` → \`'available' | 'downloadable' | 'downloading' | 'unavailable'\`. Check it first and degrade gracefully when it is not \`'available'\`.
+- \`await CM_promptAI.params()\` → \`{ defaultTopK, maxTopK, defaultTemperature, maxTemperature }\` or \`null\`. Use it to default sampling options safely; hard-coded values may drift across Chrome versions. Returns \`null\` when Nano is unavailable.
+
+### Single-shot prompt (most common)
+
+\`\`\`js
+const text = await CM_promptAI(input, options?);
+\`\`\`
+
+\`input\` is one of:
+- A plain string (treated as a user-role text prompt).
+- A multi-turn message array: \`[{ role: 'system'|'user'|'assistant', content: <string OR parts[]> }]\` where the system message must be index 0.
+
+Multimodal \`content\` parts: \`[{ type: 'text', value: '...' }, { type: 'image', value: <Blob|ImageBitmap|ArrayBuffer|data-URL> }, { type: 'audio', value: <Blob|ArrayBuffer|data-URL> }]\`. Image/audio cross the bridge as base64 data URLs (the shim serialises Blob/ImageBitmap automatically) and the SW reconstructs them before passing to Chrome. **Per-part size cap is 4 MB** (Blob \`.size\` or PNG-encoded byte length for ImageBitmap), plus a **16 megapixel pre-encode guard for ImageBitmap** (4096 × 4096 max — covers any realistic photo including 4K). Larger inputs reject with \`PROMPT_AI_BAD_INPUT\` and an actionable downscale message.
+
+\`options\`:
+- \`schema\` — JSON Schema → \`responseConstraint\`. The result string \`JSON.parse\`s into your schema.
+- \`omitResponseConstraintInput: true\` — keeps the schema OUT of the model's context window (token economy). **Requires \`schema\` too** — passing it without a schema rejects with \`PROMPT_AI_BAD_INPUT\` (the option only suppresses serialising a constraint that exists).
+- \`system\` — convenience string folded into \`initialPrompts[0]\` when no \`initialPrompts\` array is supplied.
+- \`initialPrompts\` — full \`[{role, content}]\` array; takes precedence over \`system\`.
+- \`temperature\` AND \`topK\` — sampling. **Both-or-neither**: Chrome rejects session-init if only one is provided. Out-of-range values (\`topK<1\`, \`temperature<0\`, \`temperature>maxTemperature\`) also reject as \`PROMPT_AI_BAD_INPUT\`. Pre-flight validated at the shim; you'll get the typed error rather than Chrome's misleading internal error. Read \`CM_promptAI.params()\` for defaults/limits.
+- \`expectedInputs\` / \`expectedOutputs\` — \`[{type: 'text'|'image'|'audio', languages?: ['en','ja',...]}]\`. Hint to Chrome for download-on-demand language packs; pass to \`availability()\` and \`prompt()\` with the same options.
+- \`timeoutMs\` — defaults 25000ms; hard cap 28000ms (MAIN_WORLD_BRIDGE 30s ceiling).
+- \`signal\` — AbortSignal. Aborting cancels the SW-side generation immediately.
+
+### Streaming (token-by-token)
+
+\`\`\`js
+for await (const chunk of CM_promptAI.stream(input, options?)) {
+  appendToUI(chunk);                  // delta strings
+}
+\`\`\`
+
+Returns an AsyncIterable<string>. \`options\` accepts everything from the single-shot surface. \`responseConstraint\` is honoured during streaming — chunks accumulate into a single JSON value (the final chunks may just be closing braces).
+
+### Sessions (multi-turn, opt-in)
+
+The bare \`CM_promptAI(...)\` call is per-call isolated — every call creates and destroys its own session so context never bleeds across unrelated work. For stateful conversation, opt into a session:
+
+\`\`\`js
+const session = await CM_promptAI.session({
+  system, initialPrompts,             // seed context
+  temperature, topK,                   // sampling
+  expectedInputs, expectedOutputs,
+});
+
+const a = await session.prompt('Hi, my name is Aria.');
+const b = await session.prompt('What did I say my name was?');   // remembers
+for await (const c of session.promptStream('Write a long story.', { schema })) { /* ... */ }
+await session.append([{ role: 'user', content: 'Also remember this fact.' }]);
+const branch = await session.clone();                 // fork an independent copy
+const tokens = await session.measureContextUsage('How many tokens is this?');
+
+session.contextUsage;                                  // last-known used count
+session.contextWindow;                                 // last-known budget
+await session.refresh();                               // pull fresh counts without prompting
+
+await session.destroy();                               // explicit cleanup
+\`\`\`
+
+Lifecycle: sessions auto-destroy when the tab closes, when idle for 10 minutes, when a per-tab cap (16) evicts the oldest, or when you explicitly call \`destroy()\`. After teardown, every method on the handle throws \`PROMPT_AI_SESSION_GONE\`.
+
+### Download progress + warm
+
+When \`availability()\` returns \`'downloadable'\` you can kick the download yourself and listen for progress:
+
+\`\`\`js
+CM_promptAI.addEventListener('downloadprogress', (e) => {
+  showProgress(e.loaded);              // 0 → 1; e.total is always 1
+});
+await CM_promptAI.warm();              // kicks model download/load
+\`\`\`
+
+\`CM_promptAI.warm()\` resolves to the post-warm availability state. Listeners survive across calls and receive events from any script that triggered a warm (the model is browser-global).
+
+### What Nano is good for / not
+
+**Use it for** classification, summarisation, JSON extraction, short rewrites, intent parsing, and short tool-selection (using \`responseConstraint\` to emit a tagged union — there is NO native function calling in Chrome 148 stable). Gemini Nano is small (~9216-token context) and weakens past 2 reasoning steps. **Do not** use it for code generation or multi-step reasoning; route those to the IDE agent.
+
+### Errors
+
+Every rejection is an \`Error\` with \`.code\` set; \`PROMPT_AI_CONTEXT_OVERFLOW\` also carries \`.details = { requested, contextWindow }\`. Branch on \`.code\`:
+
+| \`.code\` | When |
+|---|---|
+| \`PROMPT_AI_UNAVAILABLE\` | API not in this browser, or model can't be loaded |
+| \`PROMPT_AI_BAD_INPUT\` | Empty input, malformed message shape, sampling-pair half-set |
+| \`PROMPT_AI_TIMEOUT\` | Hard timeout or SW-side internal abort |
+| \`PROMPT_AI_CANCELLED\` | Your \`signal.abort()\` fired |
+| \`PROMPT_AI_ABORTED\` | Iterator/handle aborted (stream / session path) |
+| \`PROMPT_AI_CONTEXT_OVERFLOW\` | Chrome \`QuotaExceededError\` — context too small for input. Check \`err.details\` |
+| \`PROMPT_AI_SCHEMA_UNSUPPORTED\` | JSON Schema uses features Nano can't constrain |
+| \`PROMPT_AI_SCHEMA_VIOLATION\` | Model output failed your \`responseConstraint\` |
+| \`PROMPT_AI_ENCODING\` | Multimodal Blob malformed |
+| \`PROMPT_AI_NETWORK\` | Model download failure |
+| \`PROMPT_AI_SESSION_GONE\` | Session handle is destroyed/recycled |
+| \`PROMPT_AI_SESSION_RECYCLED\` | Session was idle-GC'd before this call landed |
+| \`PROMPT_AI_FAILED\` | Generic fallback |
+
+### Example: schema-constrained single-shot
+
+\`\`\`js
+// @grant CM_promptAI
+if (await CM_promptAI.availability() !== 'available') return;
+const limits = await CM_promptAI.params();
+const raw = await CM_promptAI('Summarise this in one sentence as JSON {"summary":"..."}', {
+  schema: { type: 'object', required: ['summary'], properties: { summary: { type: 'string' } } },
+  system: 'You output only JSON.',
+  temperature: limits.defaultTemperature,
+  topK: limits.defaultTopK,
+});
+const { summary } = JSON.parse(raw);
+\`\`\`
+
+## CM_devtools (Chrome DevTools Protocol Access)
+
+Gives your script Chrome DevTools Protocol (CDP) access. Use only when DOM, \`fetch\` interception, and \`CM_findElement\` aren't enough — typically for: Network events across cross-origin iframes, genuinely-trusted Input events, mid-flight request rewriting, headless screenshots, or breakpoints.
+
+CDP reference: <https://chromedevtools.github.io/devtools-protocol/> — look up method names there; do not invent them.
+
+### Prerequisites
+
+1. \`// @grant CM_devtools\` — this implicitly grants \`CM_withDevtools\` too.
+2. \`// @devtools-justification <80-500 chars explaining WHY>\` — shows in the user's install consent and per-row tooltip. Required for marketplace publish; soft warning at export.
+3. User must enable **Settings → Scripts → Chrome DevTools Access**. Resets every Chrome restart by design. Until enabled, CDP calls return \`DEVTOOLS_DISABLED_BY_USER\`.
+4. Chrome shows its standard yellow "X is debugging this browser" banner while you hold a session. The user can click **Cancel** on it.
+
+### Behavior to know
+
+- **CDP is tab-scoped, not frame-scoped.** \`Network.*\` and \`DOM.*\` events fire across every frame in the tab including cross-origin iframes — the main reason to reach for CDP.
+- **\`@connect\` does NOT gate CDP traffic.** Your \`@connect\` allowlist applies to \`GM_xmlhttpRequest\`, not to CDP. Your justification must reflect what your CDP code reads or modifies cross-origin.
+- **Acquire inside the function that uses CDP; release before returning.** Don't hold a session across page changes — cross-origin navigation auto-detaches, and inactive sessions auto-detach after a short idle window.
+- **If the user clicks Cancel on the banner, that tab is locked.** Re-attach is refused for ~5 minutes (or until tab reload). They reload to allow CDP again.
+
+### Usage
+
+\`\`\`javascript
+// One-shot CDP command
+const dt = await CM_devtools();
+try {
+  const m = await dt.send('Page.getLayoutMetrics');
+  // use m
+} finally {
+  await dt.close();
+}
+
+// Scoped session — auto-acquires and auto-releases (even on throw)
+const events = await CM_withDevtools(async (dt) => {
+  await dt.send('Network.enable');
+  const out = [];
+  const off = dt.on('Network.requestWillBeSent', (p) => {
+    out.push({ method: p.request.method, url: p.request.url });
+  });
+  await new Promise(r => setTimeout(r, 3000));
+  off();
+  return out;
+});
+
+// Live event subscription. dt.on returns synchronously but the underlying
+// subscription is async — yield ~50ms before the action you want to capture.
+const dt = await CM_devtools();
+await dt.send('Network.enable');
+const off = dt.on('Network.responseReceived', (p) => { /* ... */ });
+await new Promise(r => setTimeout(r, 50));
+triggerTheAction();
+off();
+await dt.close();
+\`\`\`
+
+To capture requests during the page's own load, use \`@run-at document-start\` and subscribe before yielding. The first few requests may still beat you; if you need every request from cold start, monkey-patch \`fetch\`/\`XMLHttpRequest\` synchronously instead.
+
+### Errors
+
+CDP calls throw \`Error\` with a \`.code\`:
+
+| \`.code\` | When | Tell the user |
+|---|---|---|
+| \`DEVTOOLS_DISABLED_BY_USER\` | Toggle is off | Enable Settings → Scripts → Chrome DevTools Access |
+| \`DEBUGGER_DETACHED_BY_USER\` | User clicked Cancel on the banner | Reload the tab to re-allow |
+| \`DEBUGGER_BUSY\` | Chrome DevTools is open on this tab | Close DevTools (F12) and retry |
+| \`DEVTOOLS_NOT_ACQUIRED\` | Session lost (tab navigated, etc.) | Re-acquire with a fresh \`CM_devtools()\` |
+| \`DEBUGGER_ATTACH_TIMEOUT\` | Tab is discarded/frozen | Focus the tab and reload |
+| \`DEBUGGER_UNSUPPORTED_URL\` | chrome://, devtools://, chromewebstore.google.com | Different URL, or skip CDP |
+| \`DEBUGGER_TAB_GONE\` | Tab closed mid-call | Re-acquire on a live tab |
+| \`DEBUGGER_NO_INCOGNITO_ACCESS\` | Incognito + Allow-in-incognito off | Enable at chrome://extensions |
+
+Branch on the common ones:
+
+\`\`\`javascript
+try {
+  const dt = await CM_devtools();
+  try { return await dt.send('Page.getLayoutMetrics'); }
+  finally { await dt.close(); }
+} catch (e) {
+  if (e.code === 'DEVTOOLS_DISABLED_BY_USER') return { error: 'devtools-off', action: 'Enable Settings → Scripts → Chrome DevTools Access' };
+  if (e.code === 'DEBUGGER_BUSY')             return { error: 'devtools-busy', action: 'Close DevTools (F12) and retry' };
+  if (e.code === 'DEBUGGER_DETACHED_BY_USER') return { error: 'devtools-cancelled', action: 'Reload the tab to re-allow' };
+  throw e;
+}
+\`\`\`
+
+### Don't
+
+- **Don't retry these in a loop.** \`DEVTOOLS_DISABLED_BY_USER\`, \`DEBUGGER_BUSY\`, \`DEBUGGER_DETACHED_BY_USER\` all need human action. Surface and stop.
+- **Don't acquire at script load.** Acquire inside the function that uses CDP, release before returning.
+- **Don't subscribe to high-frequency events you don't need.** \`Network.dataReceived\` fires per TCP chunk; \`Network.requestWillBeSent\` is usually what you want.
+- **Don't invent CDP method names.** \`Page.captureFullScreenshot\` doesn't exist; \`Page.captureScreenshot\` does.
 
 ## Available GM_* APIs
-Customaise supports 22 \`GM_*\` APIs. You can use either the classic \`GM_*\` (underscore) or modern \`GM.*\` (promise-based) syntax.
+Customaise supports 26 \`GM_*\` APIs (full list canonical in \`extension/src/background/services/metadata-schema-normalizer.js\` \`SUPPORTED_GRANTS\`). You can use either the classic \`GM_*\` (underscore) or modern \`GM.*\` (promise-based) syntax.
 
 ### Environment & Console
 | API | Description |
@@ -933,8 +1317,16 @@ Customaise supports 22 \`GM_*\` APIs. You can use either the classic \`GM_*\` (u
 | \`GM_getValue(k, def)\` | Read from persistent storage |
 | \`GM_deleteValue(k)\` | Delete from persistent storage |
 | \`GM_listValues()\` | List all stored keys |
+| \`GM_setValues({k:v,...})\` | Bulk set (v5.3+); atomic write of multiple keys in one call |
+| \`GM_getValues([keys])\` | Bulk read (v5.3+); fewer round-trips than per-key \`getValue\` |
+| \`GM_deleteValues([keys])\` | Bulk delete (v5.3+) |
 | \`GM_addValueChangeListener(name, cb)\` | Listen for storage changes across tabs |
 | \`GM_removeValueChangeListener(id)\` | Remove storage listener |
+
+### Cookies (Advanced)
+| API | Description |
+|-----|-------------|
+| \`GM_cookie\` | Frozen object with sub-methods, NOT a callable. \`await GM_cookie.list(details)\` returns matching cookies; \`await GM_cookie.set(details)\` writes one; \`await GM_cookie.delete(details)\` removes one. Each method also accepts a Node-style \`(err, result) => ...\` callback as a second arg; omit it to get a Promise back. \`details\` is the same shape \`chrome.cookies\` uses (url / name / domain / path / value / secure / httpOnly / sameSite / expirationDate etc.). Subject to host permissions and the script's \`@connect\` allowlist. Note: \`.store\` is a Firefox-container-specific Tampermonkey method that's stubbed in Chromium and will reject. |
 
 ### DOM & UI
 | API | Description |
@@ -948,24 +1340,25 @@ Customaise supports 22 \`GM_*\` APIs. You can use either the classic \`GM_*\` (u
 ### Network & Resources
 | API | Description |
 |-----|-------------|
-| \`GM_xmlhttpRequest(details)\` | Cross-origin HTTP requests. **Requires \`@connect\` directive.** |
-| \`GM_download(details)\` | Download a file to disk |
-| \`GM_getResourceText(name)\` | Read text content from a \`@resource\` |
-| \`GM_getResourceURL(name)\` | Get base64 data URI for a \`@resource\` |
+| \`GM_xmlhttpRequest(details)\` | Cross-origin HTTP request. \`details\` shape: \`{ method, url, headers?, data?, responseType?, timeout?, onload, onerror, onreadystatechange?, ontimeout?, onabort?, onprogress? }\`. Returns an object with an \`.abort()\` method. **Requires \`@connect <host>\` directive** for the URL's host, otherwise the call fails silently. Successful response object exposes \`status\`, \`statusText\`, \`responseHeaders\`, \`responseText\`, \`response\` (parsed per \`responseType\`), \`finalUrl\`. |
+| \`GM_download(details)\` | Save a URL to disk. \`details\` shape: \`{ url, name, headers?, saveAs?, onload?, onerror?, ontimeout?, onprogress? }\`. The \`name\` is the suggested filename; \`saveAs: true\` prompts the user for the location. Same \`@connect\` gating as \`GM_xmlhttpRequest\`. |
+| \`GM_notification(details)\` | Show a desktop OS notification. \`details\` shape: \`{ text, title?, image?, highlight?, silent?, timeout?, onclick?, ondone? }\` OR the short form \`GM_notification(text, title?, image?, onclick?)\`. \`timeout\` in milliseconds (0 = sticky). |
+| \`GM_getResourceText(name)\` | Read text content from a \`@resource\` declaration |
+| \`GM_getResourceURL(name)\` | Get base64 data URI for a \`@resource\` declaration |
 
 ### Tabs & System
 | API | Description |
 |-----|-------------|
-| \`GM_setClipboard(text)\` | Copy text to OS clipboard |
-| \`GM_openInTab(url, options)\` | Open a new browser tab |
-| \`GM_getTab(cb)\` | Get persistent state for the current tab |
-| \`GM_saveTab(obj)\` | Save persistent state for the current tab |
-| \`GM_getTabs(cb)\` | Get persistent state for all tabs |
+| \`GM_setClipboard(text, type?)\` | Copy text to OS clipboard. \`type\` defaults to \`'text'\`; use \`'html'\` to copy rich HTML. |
+| \`GM_openInTab(url, options?)\` | Open a new browser tab. \`options\` shape: \`{ active?, insert?, setParent? }\` (all booleans). Shorthand: pass a boolean instead of the object as \`loadInBackground\` (legacy form). Returns an object with \`.close()\` and \`.closed\` (boolean). |
+| \`GM_getTab(cb)\` | Read the per-tab persisted object for the current tab. \`cb\` receives the stored object (or empty \`{}\`). Per-tab storage is independent from \`GM_setValue\`'s extension-wide storage and is cleared when the tab closes. |
+| \`GM_saveTab(obj)\` | Persist an object as the current tab's per-tab state. Overwrites any previous value. |
+| \`GM_getTabs(cb)\` | Read every tab's per-tab persisted object. \`cb\` receives \`{ tabId: object, ... }\`. |
 
 ## Developer Workflow & Best Practices
 1. **Use \`GM_log\` over \`console.log\`:** \`GM_log\` output is explicitly tracked by Customaise and is visible when using the \`get_console_context\` MCP tool.
 2. **Cross-Origin Requests:** If your script needs to fetch data from \`api.github.com\`, you MUST include \`// @connect api.github.com\` in the metadata block, or \`GM_xmlhttpRequest\` will fail silently.
-3. **Handle Dynamic Pages:** Most modern sites are SPAs (Single Page Applications). Elements may not exist immediately. Use \`VM_findElement\` or \`MutationObserver\` instead of assuming elements are present on load.
+3. **Handle Dynamic Pages:** Most modern sites are SPAs (Single Page Applications). Elements may not exist immediately. Use \`CM_findElement\` or \`MutationObserver\` instead of assuming elements are present on load.
 4. **Execution Timing:** \`// @run-at document-idle\` is the safest default as it ensures the initial DOM is fully parsed.
 `;
 
@@ -1058,10 +1451,226 @@ Even if your tool is granted the \`allow\` permission, you can dynamically invok
 - You MUST explicitly include a \`@grant\` directive for each API you use, exactly like a UserScript.
 - \`unsafeWindow\` should NOT be used (it is redundant because you are already in the MAIN world).
 
+## navigator.modelContext: USE BARE NAME (do not prefix with globalThis/window/self)
+
+Customaise wraps \`navigator.modelContext\` per-script via a function-scoped Proxy injected by the IIFE wrapper. The Proxy enforces:
+- User-set **Deny** overrides (silent no-op when the user has denied this script's tool)
+- Tool-conflict attribution (when two scripts register the same tool name on the same tab, the SW conflict ledger gets the right scriptId so the UI badge shows on both)
+- Multi-conflict iteration UX (dup throws are swallowed so all conflicts surface in one pass instead of crashing on the first)
+
+**Always reference \`navigator.modelContext\` with the bare \`navigator\` identifier:**
+\`\`\`js
+// CORRECT — resolves through the per-script Proxy
+navigator.modelContext.registerTool({ name: 'foo', description: '...', execute: ... });
+const tools = navigator.modelContext.listTools();
+\`\`\`
+
+**Never explicitly access via the global object — those bypass the Proxy:**
+\`\`\`js
+// WRONG — these skip Customaise's Deny enforcement, conflict attribution,
+//         and multi-conflict UX. The user's overrides will silently not apply.
+globalThis.navigator.modelContext.registerTool({ ... });
+window.navigator.modelContext.registerTool({ ... });
+self.navigator.modelContext.registerTool({ ... });
+\`\`\`
+
+The bare \`navigator\` is shadowed by a function-local declaration inside the IIFE wrapper. Explicit globalThis/window/self lookups skip the lexical scope chain and hit the unwrapped browser navigator instead. This is a deliberate Customaise convention — the W3C \`navigator.modelContext\` spec doesn't require Customaise's deny/attribution semantics, but our scripts depend on them for proper UX.
+
+**Spec deviation note**: when a tool name collides with another script's registration on the same tab, the W3C spec says \`registerTool\` should throw \`InvalidStateError\`. Customaise's wrapper SWALLOWS this throw (sends the conflict signal to the SW for badge surfacing, then returns a no-op handle) so user code continues past the duplicate call. This means scripts that explicitly \`try/catch\` \`InvalidStateError\` will not see it; rely on the Tool Conflict badge in the script row UI for resolution instead.
+
 ## Advanced Networking & Auth Interception
-You can use \`@run-at document-start\` to inject your AgentScript before the target page loads. 
-This allows you to patch \`window.fetch\` or \`XMLHttpRequest\` to capture bearer tokens or authentication headers. 
+You can use \`@run-at document-start\` to inject your AgentScript before the target page loads.
+This allows you to patch \`window.fetch\` or \`XMLHttpRequest\` to capture bearer tokens or authentication headers.
 You can then securely store them using \`GM_setValue\` and retrieve them using \`GM_getValue\` inside your WebMCP tool executions, enabling your AI agents to perform authenticated actions on behalf of the user.
+
+## CM_promptAI (On-Device AI / Gemini Nano)
+
+Run Chrome's built-in Prompt API (on-device Gemini Nano) from your tool's \`execute\`. Runs on-device: no API key, no cost, no server round-trip, works offline once the model is provisioned. Chrome desktop only (the model is not present on Android/iOS or other browsers), so always feature-detect.
+
+Declare \`// @grant CM_promptAI\`.
+
+**Why use it inside a WebMCP tool?** Classifying user input, picking a label from a small enum, summarising a chunk before returning it to the IDE agent, drafting a short reply — all things where round-tripping to the IDE agent would be slower and more expensive than calling Nano locally for ~600ms. **Route heavy synthesis to the IDE agent (yourself), not to CM_promptAI.** Nano weakens past 2 reasoning steps; it is your fast local label-maker, not a sub-agent.
+
+### Capability probe
+
+- \`await CM_promptAI.availability()\` → \`'available' | 'downloadable' | 'downloading' | 'unavailable'\`.
+- \`await CM_promptAI.params()\` → \`{ defaultTopK, maxTopK, defaultTemperature, maxTemperature }\` or \`null\`.
+
+### Single-shot prompt
+
+\`\`\`js
+const text = await CM_promptAI(input, options?);
+\`\`\`
+
+\`input\`: plain string OR \`[{role: 'system'|'user'|'assistant', content: <string OR parts[]>}]\` where the system message must be index 0. Multimodal \`content\` parts: \`[{type: 'text', value: '...'}, {type: 'image', value: <Blob|ImageBitmap|ArrayBuffer|data-URL>}, {type: 'audio', value: <Blob|ArrayBuffer|data-URL>}]\`. The shim serialises image/audio across the bridge automatically. **Per-part size cap is 4 MB**, plus a 16 megapixel pre-encode guard for ImageBitmap (4096 × 4096 max). Larger inputs reject with \`PROMPT_AI_BAD_INPUT\` — downscale or compress.
+
+\`options\`:
+- \`schema\` — JSON Schema → \`responseConstraint\`. Result string \`JSON.parse\`s into your schema.
+- \`omitResponseConstraintInput: true\` — schema NOT serialised into context window (saves tokens). **Requires \`schema\` too** — passing it alone rejects with \`PROMPT_AI_BAD_INPUT\`.
+- \`system\` / \`initialPrompts\` — system message convenience OR full \`[{role, content}]\` seed array.
+- \`temperature\` AND \`topK\` — sampling. **Both-or-neither**; out-of-range values reject as \`PROMPT_AI_BAD_INPUT\`. Default via \`CM_promptAI.params()\`.
+- \`expectedInputs\` / \`expectedOutputs\` — \`[{type: 'text'|'image'|'audio', languages?: [...]}]\` language/modality hints.
+- \`timeoutMs\` — default 25000ms, hard cap 28000ms.
+- \`signal\` — AbortSignal.
+
+### Streaming (token-by-token)
+
+\`\`\`js
+for await (const chunk of CM_promptAI.stream(input, options?)) { /* delta strings */ }
+\`\`\`
+
+Same options as single-shot. Streams JSON when \`schema\` is set (concat chunks then \`JSON.parse\`).
+
+### Sessions (multi-turn, opt-in)
+
+The bare \`CM_promptAI(...)\` is per-call isolated. For stateful conversation:
+
+\`\`\`js
+const session = await CM_promptAI.session({ system, initialPrompts, temperature, topK });
+const a = await session.prompt('Remember the project codename is "Halcyon".');
+const b = await session.prompt('What codename did I just give you?');
+for await (const c of session.promptStream('Long explanation...', { schema })) {}
+await session.append([{ role: 'user', content: 'Also remember the deadline is Friday.' }]);
+const fork = await session.clone();                                  // independent branch
+const tokens = await session.measureContextUsage('How many tokens?');
+session.contextUsage; session.contextWindow;                          // live (refresh with session.refresh())
+await session.destroy();
+\`\`\`
+
+Auto-cleanup: tab close, 10-minute idle, per-tab cap (16), or explicit \`destroy()\`. After teardown every method throws \`PROMPT_AI_SESSION_GONE\`.
+
+**HITL applies normally** — \`CM_promptAI\` calls happen inside your tool's \`execute\` body, after the user has already approved the tool. The local-AI call itself isn't gated (no network, no privileged surface beyond what your tool already does).
+
+### Download progress
+
+\`\`\`js
+CM_promptAI.addEventListener('downloadprogress', (e) => { /* e.loaded: 0→1 */ });
+await CM_promptAI.warm();              // kicks model load; resolves to post-warm state
+\`\`\`
+
+### Errors
+
+Every rejection is an \`Error\` with \`.code\`; \`PROMPT_AI_CONTEXT_OVERFLOW\` carries \`.details = { requested, contextWindow }\`. Codes: \`PROMPT_AI_UNAVAILABLE\`, \`PROMPT_AI_BAD_INPUT\`, \`PROMPT_AI_TIMEOUT\`, \`PROMPT_AI_CANCELLED\`, \`PROMPT_AI_ABORTED\`, \`PROMPT_AI_CONTEXT_OVERFLOW\`, \`PROMPT_AI_SCHEMA_UNSUPPORTED\`, \`PROMPT_AI_SCHEMA_VIOLATION\`, \`PROMPT_AI_ENCODING\`, \`PROMPT_AI_NETWORK\`, \`PROMPT_AI_SESSION_GONE\`, \`PROMPT_AI_SESSION_RECYCLED\`, \`PROMPT_AI_FAILED\`. Branch on \`err.code\` and surface actionable messages.
+
+### Example: classify inside an AgentScript tool
+
+\`\`\`js
+// @grant CM_promptAI
+// @webmcp classify_sentiment allow
+navigator.modelContext.registerTool({
+  name: 'classify_sentiment',
+  description: 'Classify text into positive/negative/neutral via on-device Nano.',
+  schema: { type: 'object', required: ['text'], properties: { text: { type: 'string' } } },
+  readOnlyHint: true,
+  execute: async ({ text }) => {
+    if (await CM_promptAI.availability() !== 'available') {
+      return { ok: false, error: 'nano-unavailable' };
+    }
+    const raw = await CM_promptAI(\`Classify: \${text}\\nReturn JSON.\`, {
+      schema: {
+        type: 'object', required: ['label', 'confidence'],
+        properties: {
+          label: { type: 'string', enum: ['positive', 'negative', 'neutral'] },
+          confidence: { type: 'number', minimum: 0, maximum: 1 },
+        },
+      },
+      system: 'You output only JSON.',
+    });
+    return { ok: true, ...JSON.parse(raw) };
+  },
+});
+\`\`\`
+
+## CM_devtools (Chrome DevTools Protocol Access)
+
+Expose Chrome DevTools Protocol (CDP) as a WebMCP tool. Use only when DOM, \`fetch\` interception, and \`CM_findElement\` aren't enough — typically for: Network events across cross-origin iframes, genuinely-trusted Input events, mid-flight request rewriting, headless screenshots, or breakpoints.
+
+CDP reference: <https://chromedevtools.github.io/devtools-protocol/> — look up method names there; do not invent them.
+
+### Prerequisites
+
+1. \`// @grant CM_devtools\` — this implicitly grants \`CM_withDevtools\` too.
+2. \`// @devtools-justification <80-500 chars explaining WHY>\` — shows in the user's install consent and per-row tooltip. \`export_script\` returns \`DEVTOOLS_JUSTIFICATION_MISSING\` in \`warnings[]\` if absent. Required for marketplace publish.
+3. User must enable **Settings → Scripts → Chrome DevTools Access**. Resets every Chrome restart by design. While off, CDP calls return \`DEVTOOLS_DISABLED_BY_USER\` and the script's row toggle renders amber as a heads-up.
+4. Chrome shows its standard yellow "X is debugging this browser" banner while you hold a session. The user can click **Cancel** on it — say so in your tool description if it matters.
+
+### Behavior to know
+
+- **CDP is tab-scoped, not frame-scoped.** \`Network.*\` and \`DOM.*\` events fire across every frame in the tab including cross-origin iframes — the main reason to reach for CDP.
+- **\`@connect\` does NOT gate CDP traffic.** Your \`@connect\` allowlist applies to \`GM_xmlhttpRequest\`, not to CDP. Your justification must reflect what your CDP code reads or modifies cross-origin.
+- **Acquire inside \`execute\`; release before returning.** Don't hold a session across tool calls or page changes — cross-origin navigation auto-detaches, and inactive sessions auto-detach after a short idle window. Use \`CM_withDevtools\` to make the lifecycle obvious.
+- **If the user clicks Cancel on the banner, that tab is locked.** Re-attach is refused for ~5 minutes or until tab reload. They reload to allow CDP again.
+
+### Pattern — CDP-backed tool
+
+\`\`\`javascript
+// ==AgentScript==
+// @name         Network Sniffer
+// @match        https://target.example.com/*
+// @webmcp       tgt_capture_network allow
+// @grant        CM_devtools
+// @grant        GM_log
+// @devtools-justification Subscribes to Network.requestWillBeSent for a brief window so the agent can see what API endpoints the page hits in response to a UI action. The page uses cross-origin iframes whose requests window.fetch interception cannot see.
+// ==/AgentScript==
+
+// Prefix tool names with a 2-4 letter site code — WebMCP tool names share
+// a global namespace across all open AgentScripts on the tab, so generic
+// names like 'capture_network' will collide.
+navigator.modelContext.registerTool({
+  name: 'tgt_capture_network',
+  description: 'Hold a CDP session for N ms and return requests the page makes during the window. Chrome shows a yellow "debugging this browser" banner while active.',
+  schema: {
+    type: 'object',
+    properties: { durationMs: { type: 'number', description: 'Capture window in ms. 500-10000.' } },
+  },
+  readOnlyHint: true,
+  execute: async (args) => {
+    const ms = Math.min(Math.max(Number(args?.durationMs) || 3000, 500), 10000);
+    const captured = [];
+    try {
+      await CM_withDevtools(async (dt) => {
+        await dt.send('Network.enable');
+        const off = dt.on('Network.requestWillBeSent', (p) => {
+          captured.push({ method: p.request.method, url: p.request.url, type: p.type });
+        });
+        // dt.on returns synchronously but the underlying subscription is
+        // async. Yield once so events fired right at the start of the
+        // window are picked up.
+        await new Promise(r => setTimeout(r, 50));
+        await new Promise(r => setTimeout(r, ms));
+        off();
+      });
+      return { ok: true, captured };
+    } catch (e) {
+      if (e.code === 'DEVTOOLS_DISABLED_BY_USER') return { ok: false, error: 'devtools-off',       action: 'Enable Settings → Scripts → Chrome DevTools Access' };
+      if (e.code === 'DEBUGGER_BUSY')             return { ok: false, error: 'devtools-busy',      action: 'Close Chrome DevTools (F12) and retry' };
+      if (e.code === 'DEBUGGER_DETACHED_BY_USER') return { ok: false, error: 'devtools-cancelled', action: 'Reload the tab to re-allow' };
+      return { ok: false, error: e.code || 'devtools-failed', message: String(e.message || e) };
+    }
+  },
+});
+\`\`\`
+
+### Errors
+
+| \`.code\` | When | Tell the user |
+|---|---|---|
+| \`DEVTOOLS_DISABLED_BY_USER\` | Toggle is off | Enable Settings → Scripts → Chrome DevTools Access |
+| \`DEBUGGER_DETACHED_BY_USER\` | User clicked Cancel on the banner | Reload the tab to re-allow |
+| \`DEBUGGER_BUSY\` | Chrome DevTools is open on this tab | Close DevTools (F12) and retry |
+| \`DEVTOOLS_NOT_ACQUIRED\` | Session lost (tab navigated, etc.) | Re-acquire with a fresh \`CM_devtools()\` |
+| \`DEBUGGER_ATTACH_TIMEOUT\` | Tab is discarded/frozen | Focus the tab and reload |
+| \`DEBUGGER_UNSUPPORTED_URL\` | chrome://, devtools://, chromewebstore.google.com | Different URL, or skip CDP |
+| \`DEBUGGER_TAB_GONE\` | Tab closed mid-call | Re-acquire on a live tab |
+| \`DEBUGGER_NO_INCOGNITO_ACCESS\` | Incognito + Allow-in-incognito off | Enable at chrome://extensions |
+
+### Don't
+
+- **Don't retry these in a loop.** \`DEVTOOLS_DISABLED_BY_USER\`, \`DEBUGGER_BUSY\`, \`DEBUGGER_DETACHED_BY_USER\` all need human action. Surface the error and stop.
+- **Don't acquire at module scope.** Always inside \`execute\` so the session lifecycle aligns with the tool call.
+- **Don't subscribe to high-frequency events you don't need.** \`Network.dataReceived\` fires per TCP chunk; \`Network.requestWillBeSent\` is usually what you want.
+- **Don't use unprefixed tool names.** WebMCP tool names share a global namespace across all open AgentScripts on the tab. Prefix with a 2-4 letter site code.
+- **Don't invent CDP method names.** Look them up.
 
 ## AgentScript Workflow
 1. Use \`get_page_context\` to understand the page structure
