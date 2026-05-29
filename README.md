@@ -211,6 +211,15 @@ Each selection includes **bulletproof tiered selectors** (stable IDs → data at
 7. call_webmcp_tool                            → invoke one; prompt-gated calls wait for user consent
 ```
 
+## Conventions resources
+
+Two MCP resources document the script formats and grant surface the extension exposes:
+
+- `customaise://userscript-conventions` — the `==UserScript==` metadata block, `@match` / `@grant` / `@connect` / `@require` / `@resource`, the `GM_*` API table, and the Customaise `CM_*` grants: `CM_promptAI` (on-device Gemini Nano via Chrome 148+ Prompt API, with sessions, streaming, and multimodal input), `CM_devtools` / `CM_withDevtools` (Chrome DevTools Protocol with per-session user opt-in), and `CM_findElement` / `CM_findExternalElement` (selector helpers that survive page updates).
+- `customaise://agentscript-conventions` — the `==AgentScript==` metadata block, `// @webmcp <tool> <permission>` declarations, the `navigator.modelContext.registerTool()` registration pattern, the consent gate, and the same `CM_*` and `GM_*` surface available to UserScripts.
+
+Read whichever fits the task before writing a script.
+
 ## File Sync
 
 Use `sync_scripts` to bulk-export every script to a local directory:
