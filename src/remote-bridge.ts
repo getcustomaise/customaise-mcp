@@ -16,17 +16,53 @@
  *                        { role: 'status', extensionConnected }
  *
  * Failure modes:
- *   - Leader goes away: WS close fires. All in-flight requests reject
- *     with a clear error. Subsequent request() calls attempt to
- *     promote self to leader (try to bind :port). If promotion fails
- *     (another follower raced and won), we reconnect as follower.
+ *   - Leader goes away: WS close fires and every in-flight request rejects
+ *     with a clear error, then we reconnect to :port with a capped backoff
+ *     until a leader answers again.
+ *
+ *     That reconnect is the whole recovery story, and it exists because it
+ *     did not. This comment used to claim that "subsequent request() calls
+ *     attempt to promote self to leader", which was never implemented: there
+ *     is no bind anywhere in this file, and there was no reconnect either.
+ *     A follower whose leader died stayed dead. In practice that meant
+ *     restarting your IDE bricked the resident CLI daemon until someone ran
+ *     `customaise daemon stop`, with every command returning exit 3.
+ *
+ *     Reconnecting covers the case that actually happens: one leader
+ *     replaces another and the extension reattaches to it. If NO leader ever
+ *     comes back there is nothing to talk to anyway, and the daemon's idle
+ *     guard eventually exits it; the next CLI invocation spawns a fresh
+ *     process that elects properly through `createBridge`. Promotion in
+ *     place would mean swapping this object for an ExtensionBridge while 23
+ *     tool handlers hold a reference to it, which is a facade this does not
+ *     need to buy that last case.
  */
 
 import { WebSocket } from 'ws';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { McpError } from '@modelcontextprotocol/sdk/types.js';
-import type { Bridge, BridgeClientInfo } from './bridge.js';
+import { ProtocolError } from "@modelcontextprotocol/server";
+import { ERROR_CODE_DISPATCH_TIMEOUT, ERROR_CODE_RELAY_PROTOCOL_MISMATCH } from './cap-state.js';
+import type { Bridge, BridgeClientInfo, BridgeSessionSnapshot, SystemStatusSnapshot, DispatchOptions } from './bridge.js';
+import { RELAY_PROTOCOL_VERSION } from './bridge.js';
 import { FOLLOWER_ORIGIN } from './extension-bridge.js';
+
+/**
+ * This process's own package version, for the leader-skew warning in
+ * `_applyStatusFrame`. Read the same way extension-bridge reads MCP_VERSION,
+ * and kept local rather than imported so the bridge modules stay
+ * dependency-free of build-server.
+ */
+const OWN_VERSION: string = (() => {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    return JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf-8')).version || '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+})();
 
 interface PendingFollowerRequest {
   resolve: (value: unknown) => void;
@@ -38,7 +74,7 @@ type LeaderFrame =
   | { role: 'res'; id: string; success: boolean; result?: unknown; error?: string }
   | { role: 'res-pending'; id: string; expectedTimeoutMs: number; reason?: string }
   | { role: 'push'; type: string; data: any }
-  | { role: 'status'; extensionConnected: boolean };
+  | { role: 'status'; extensionConnected: boolean; session?: BridgeSessionSnapshot };
 
 export class RemoteBridge implements Bridge {
   readonly role = 'follower' as const;
@@ -51,6 +87,30 @@ export class RemoteBridge implements Bridge {
   private extensionConnected = false;
   private closed = false;
   private myClientInfo: BridgeClientInfo | null = null;
+  private sessionSnapshot: BridgeSessionSnapshot | null = null;
+  private _warnedLeaderSkew = false;
+  /**
+   * Non-null when the process on :4050 speaks a different relay protocol.
+   *
+   * Set from the status frame (a missing `relayProtocol` means a leader
+   * built before the contract existed, which is the same situation), and by
+   * an explicit 4001 eviction. Cleared on every fresh handshake, because the
+   * mismatched leader dying and a compatible one winning the port is the
+   * normal recovery: reconnect keeps running at capped backoff, so this
+   * heals itself the moment the older process goes away.
+   */
+  private protocolMismatch: string | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempts = 0;
+
+  /**
+   * Backoff for reattaching to a leader. Capped rather than unbounded: one
+   * WebSocket attempt every few seconds costs nothing, and an IDE that comes
+   * back four minutes later should be picked up without the daemon having
+   * given up on it.
+   */
+  private readonly RECONNECT_BASE_MS = 250;
+  private readonly RECONNECT_MAX_MS = 5000;
 
   /**
    * Timeout (ms) for the initial status frame after WS open. If the
@@ -105,6 +165,12 @@ export class RemoteBridge implements Bridge {
 
     ws.on('open', () => {
       this._log(`Connected to leader on :${this.port} (awaiting status handshake)`);
+      // Identify ourselves before anything else. The leader enforces the
+      // relay contract on this frame and evicts a mismatch with a close
+      // reason we surface verbatim; see RELAY_PROTOCOL_VERSION in bridge.ts.
+      try {
+        ws.send(JSON.stringify({ role: 'follower-hello', relayProtocol: RELAY_PROTOCOL_VERSION, version: OWN_VERSION }));
+      } catch { /* close handler owns the failure path */ }
       // Don't resolve here — wait for the status frame.
     });
 
@@ -117,7 +183,13 @@ export class RemoteBridge implements Bridge {
         if (!handshakeComplete && frame.role === 'status') {
           handshakeComplete = true;
           clearTimeout(handshakeTimer);
-          this.extensionConnected = frame.extensionConnected;
+          // Through the SAME handler the later frames use. Reading only
+          // `extensionConnected` here is what made `doctor` report every
+          // session field as unknown forever: the connect-time frame is the
+          // one that carries them, and re-broadcasts only follow an
+          // init_session or a connect, neither of which happens again for a
+          // follower that attached after the extension was already up.
+          this._applyStatusFrame(frame);
           // If MCP already called setOwnClientInfo before the WS was
           // open, flush the deferred send now that we have a pipe.
           this._forwardClientInfoIfReady();
@@ -135,6 +207,13 @@ export class RemoteBridge implements Bridge {
 
     ws.on('close', (code, reason) => {
       this._log(`Leader closed connection (code=${code}, reason=${reason.toString()})`);
+      // An explicit eviction: the leader read our hello and refused it. Keep
+      // the reason so every dispatch until a compatible leader appears fails
+      // with the actual explanation instead of a generic reconnect error.
+      if (code === 4001) {
+        this.protocolMismatch = reason.toString() ||
+          ('The leader on :' + this.port + ' evicted this process over a relay protocol mismatch. Restart the older of the two.');
+      }
       clearTimeout(handshakeTimer);
       this.ws = null;
       this.extensionConnected = false;
@@ -148,7 +227,11 @@ export class RemoteBridge implements Bridge {
       if (!settled) {
         settled = true;
         reject(new Error(`Could not connect to leader on :${this.port} — connection closed before handshake`));
+        return;
       }
+      // We were a working follower and the leader went away. Reattach:
+      // usually another process has already taken the port.
+      this._scheduleReconnect();
     });
 
     ws.on('error', (err) => {
@@ -171,7 +254,9 @@ export class RemoteBridge implements Bridge {
         if (frame.success) {
           pending.resolve(frame.result);
         } else {
-          pending.reject(new Error(frame.error || 'Leader relayed an error from the extension'));
+          pending.reject(this._maybeRehydrateProtocolError(
+            new Error(frame.error || 'Leader relayed an error from the extension'),
+          ));
         }
         break;
       }
@@ -184,8 +269,12 @@ export class RemoteBridge implements Bridge {
           const stillPending = this.pending.get(frame.id);
           if (!stillPending) return;
           this.pending.delete(frame.id);
-          stillPending.reject(new Error(
+          // See the leader's matching branch: our timer firing is a
+          // dispatch timeout, not evidence of what the user chose.
+          stillPending.reject(new ProtocolError(
+            ERROR_CODE_DISPATCH_TIMEOUT,
             `Request to extension timed out after ${extendMs}ms (type=consent-pending, id=${frame.id})`,
+            { type: 'dispatch_timeout' },
           ));
         }, extendMs);
         this._log(`Request ${frame.id} extended to ${extendMs}ms (reason: ${frame.reason || 'unspecified'})`);
@@ -200,7 +289,7 @@ export class RemoteBridge implements Bridge {
         break;
       }
       case 'status': {
-        this.extensionConnected = frame.extensionConnected;
+        this._applyStatusFrame(frame);
         break;
       }
       default: {
@@ -214,11 +303,26 @@ export class RemoteBridge implements Bridge {
       throw new Error('Bridge is closed');
     }
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new Error('Leader bridge is not connected. The customaise-mcp leader process may have exited.');
+      throw new ProtocolError(
+        ERROR_CODE_DISPATCH_TIMEOUT,
+        'Leader bridge is not connected. The customaise-mcp leader process may have exited.',
+        { type: 'leader_unreachable' },
+      );
+    }
+    // Before the extension check, because through a mismatched leader even
+    // `extensionConnected` came from a frame whose shape we cannot trust.
+    if (this.protocolMismatch) {
+      throw new ProtocolError(
+        ERROR_CODE_RELAY_PROTOCOL_MISMATCH,
+        this.protocolMismatch,
+        { type: 'relay_protocol_mismatch' },
+      );
     }
     if (!this.extensionConnected) {
-      throw new Error(
-        'Customaise extension is not connected to the leader bridge. Make sure Chrome is running with the Customaise extension loaded.',
+      throw new ProtocolError(
+        ERROR_CODE_DISPATCH_TIMEOUT,
+        'Customaise extension is not connected to the leader bridge. Check that Chrome is running with the extension loaded, that MCP is enabled in Customaise Settings, and that you are signed in: signing out disables the bridge deliberately.',
+        { type: 'extension_not_connected' },
       );
     }
 
@@ -227,7 +331,11 @@ export class RemoteBridge implements Bridge {
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`Request to extension timed out after ${this.requestTimeoutMs}ms (type=${type}, id=${id})`));
+        reject(new ProtocolError(
+          ERROR_CODE_DISPATCH_TIMEOUT,
+          `Request to extension timed out after ${this.requestTimeoutMs}ms (type=${type}, id=${id})`,
+          { type: 'dispatch_timeout' },
+        ));
       }, this.requestTimeoutMs);
 
       this.pending.set(id, { resolve, reject, timer });
@@ -241,20 +349,44 @@ export class RemoteBridge implements Bridge {
    * Cap-enforced tool dispatch (ARD §4.4) for follower processes.
    * Sends a `req-dispatch` frame to the leader; the leader runs cap
    * enforcement against its single CapSession (one per extension
-   * connection, not per IDE) and relays the result back. McpError
+   * connection, not per IDE) and relays the result back. ProtocolError
    * codes survive the relay via JSON-encoded error strings the
    * leader writes for us to rehydrate here.
    */
-  async dispatchTool(tool: string, args: Record<string, unknown> = {}): Promise<unknown> {
+  async dispatchTool(
+    tool: string,
+    args: Record<string, unknown> = {},
+    _opts: DispatchOptions = {},
+  ): Promise<unknown> {
+    // Cancellation is not forwarded across the follower channel yet: the
+    // leader owns the dispatch and the peer protocol has no cancel frame.
+    // A follower that aborts still stops waiting; the modal closes on its
+    // own five-minute budget. Named rather than silent so the gap is
+    // visible when the peer protocol next changes.
     if (this.closed) {
       throw new Error('Bridge is closed');
     }
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new Error('Leader bridge is not connected. The customaise-mcp leader process may have exited.');
+      throw new ProtocolError(
+        ERROR_CODE_DISPATCH_TIMEOUT,
+        'Leader bridge is not connected. The customaise-mcp leader process may have exited.',
+        { type: 'leader_unreachable' },
+      );
+    }
+    // Before the extension check, because through a mismatched leader even
+    // `extensionConnected` came from a frame whose shape we cannot trust.
+    if (this.protocolMismatch) {
+      throw new ProtocolError(
+        ERROR_CODE_RELAY_PROTOCOL_MISMATCH,
+        this.protocolMismatch,
+        { type: 'relay_protocol_mismatch' },
+      );
     }
     if (!this.extensionConnected) {
-      throw new Error(
-        'Customaise extension is not connected to the leader bridge. Make sure Chrome is running with the Customaise extension loaded.',
+      throw new ProtocolError(
+        ERROR_CODE_DISPATCH_TIMEOUT,
+        'Customaise extension is not connected to the leader bridge. Check that Chrome is running with the extension loaded, that MCP is enabled in Customaise Settings, and that you are signed in: signing out disables the bridge deliberately.',
+        { type: 'extension_not_connected' },
       );
     }
 
@@ -268,10 +400,10 @@ export class RemoteBridge implements Bridge {
 
       this.pending.set(id, {
         resolve,
-        // Wrap reject so we can rehydrate McpError from the leader's
+        // Wrap reject so we can rehydrate ProtocolError from the leader's
         // JSON-encoded error string.
         reject: (err) => {
-          const rehydrated = this._maybeRehydrateMcpError(err);
+          const rehydrated = this._maybeRehydrateProtocolError(err);
           reject(rehydrated);
         },
         timer,
@@ -283,18 +415,27 @@ export class RemoteBridge implements Bridge {
   }
 
   /**
-   * The leader serialises McpError as `JSON.stringify({code, message, data})`
-   * in the relayed `error` field; rehydrate to a real McpError so the
+   * The leader serialises ProtocolError as `JSON.stringify({code, message, data})`
+   * in the relayed `error` field; rehydrate to a real ProtocolError so the
    * follower's MCP SDK surfaces the right JSON-RPC code to its IDE.
    * Plain Errors (network drops, etc.) pass through unchanged.
    */
-  private _maybeRehydrateMcpError(err: Error): Error {
+  private _maybeRehydrateProtocolError(err: Error): Error {
     const msg = err?.message;
     if (typeof msg !== 'string' || !msg.startsWith('{')) return err;
     try {
       const parsed = JSON.parse(msg);
-      if (parsed && typeof parsed.code === 'number' && typeof parsed.message === 'string') {
-        return new McpError(parsed.code, parsed.message, parsed.data ?? undefined);
+      if (!parsed || typeof parsed.message !== 'string') return err;
+      if (typeof parsed.code === 'number') {
+        return new ProtocolError(parsed.code, parsed.message, parsed.data ?? undefined);
+      }
+      // Codeless but typed: the extension's refusals carry `data.type` and no
+      // number, on purpose. Rebuild a plain Error with the data attached so
+      // the type survives the relay and the CLI can still branch on it.
+      if (parsed.data !== undefined && parsed.data !== null) {
+        const rebuilt: Error & { data?: unknown } = new Error(parsed.message);
+        rebuilt.data = parsed.data;
+        return rebuilt;
       }
     } catch { /* not JSON, fall through */ }
     return err;
@@ -337,8 +478,49 @@ export class RemoteBridge implements Bridge {
     }
   }
 
+  /**
+   * Reattach to whatever holds :port now, with a capped backoff.
+   *
+   * Never runs after a deliberate `close()`, and never stacks: a pending
+   * timer is left alone rather than replaced, so a burst of close events
+   * cannot turn into a burst of connection attempts.
+   */
+  private _scheduleReconnect(): void {
+    if (this.closed || this.reconnectTimer) return;
+
+    const delay = Math.min(
+      this.RECONNECT_BASE_MS * 2 ** this.reconnectAttempts,
+      this.RECONNECT_MAX_MS,
+    );
+    this.reconnectAttempts++;
+
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.closed) return;
+      this._connect(
+        () => {
+          this.reconnectAttempts = 0;
+          this._log(`Reattached to leader on :${this.port}`);
+          // The status frame that resolves this also re-sends our client
+          // info, so the extension's connected-IDE list repopulates without
+          // anything here having to remember to do it.
+        },
+        (err) => {
+          this._log(`Reattach failed: ${err.message}`);
+          this._scheduleReconnect();
+        },
+      );
+    }, delay);
+    // Do not hold the process open purely to retry a connection.
+    this.reconnectTimer.unref?.();
+  }
+
   async close(): Promise<void> {
     this.closed = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     for (const [, pending] of this.pending) {
       clearTimeout(pending.timer);
       pending.reject(new Error('Bridge is shutting down'));
@@ -348,6 +530,69 @@ export class RemoteBridge implements Bridge {
       try { this.ws.close(1000, 'Follower shutting down'); } catch { /* ignore */ }
       this.ws = null;
     }
+  }
+
+  /**
+   * Adopt a leader status frame. One definition, because two paths receive
+   * these: the connect handshake and the ongoing frame router. A field added
+   * to only one of them is the asymmetry that shows up as state which is
+   * either never set or set once and then reverts.
+   */
+  private _applyStatusFrame(frame: { relayProtocol?: number; extensionConnected: boolean; session?: BridgeSessionSnapshot }): void {
+    // The relay contract, checked from the only frame an old leader would
+    // still send. Absent means the leader predates the contract: same
+    // situation as a mismatch, and it must fail closed for the same reason —
+    // every frame after this one would have undefined semantics. Cleared on
+    // match so a compatible leader winning the port heals us without a
+    // restart.
+    if (frame.relayProtocol !== RELAY_PROTOCOL_VERSION) {
+      this.protocolMismatch =
+        'The process holding :' + this.port + ' speaks relay protocol ' +
+        (frame.relayProtocol ?? 'pre-1 (older than the contract)') +
+        ' but this one speaks ' + RELAY_PROTOCOL_VERSION +
+        '. Restart the older of the two (usually the IDE-spawned server, or `customaise daemon stop`).';
+      this._log(this.protocolMismatch);
+    } else {
+      this.protocolMismatch = null;
+    }
+    this.extensionConnected = frame.extensionConnected;
+    // A follower has no CapSession of its own; the leader relays its snapshot
+    // so `doctor` answers the same question from either role.
+    if (frame.session) this.sessionSnapshot = frame.session;
+    // Version skew between this process and the one holding :4050. Nothing
+    // negotiates this seam: the IDE owns the leader's lifetime and `npx -y`
+    // resolves `latest` per spawn, so every rollout mixes builds for hours by
+    // design. The relay frames are additive JSON, so skew works today — this
+    // warning is what turns "works by luck" into "visible when the luck runs
+    // out". Once, not per frame: status frames re-arrive on every change.
+    const lv = frame.session?.leaderVersion;
+    if (lv && lv !== OWN_VERSION && !this._warnedLeaderSkew) {
+      this._warnedLeaderSkew = true;
+      process.stderr.write(
+        '[customaise-mcp] leader on :4050 is ' + lv + ' but this process is ' + OWN_VERSION +
+        '. Mixed versions relay fine today, but if something is inexplicably wrong, restart the older one.\n',
+      );
+    }
+  }
+
+  getSystemStatus(): SystemStatusSnapshot | null {
+    return this.sessionSnapshot?.systemStatus ?? null;
+  }
+
+  getSessionSnapshot(): BridgeSessionSnapshot {
+    return this.sessionSnapshot ?? {
+      extensionConnected: this.extensionConnected,
+      systemStatus: null,
+      tier: null,
+      authenticated: null,
+      remoteApprovals: null,
+      capMode: null,
+      dailyUsed: null,
+      dailyCap: null,
+      weeklyUsed: null,
+      leaderVersion: null,
+      weeklyCap: null,
+    };
   }
 
   /** Exposed for logs and tests — matches ExtensionBridge.isConnected shape. */

@@ -26,8 +26,10 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { McpError } from '@modelcontextprotocol/sdk/types.js';
-import type { Bridge, BridgeClientInfo } from './bridge.js';
+import { ProtocolError } from "@modelcontextprotocol/server";
+import type { Bridge, BridgeClientInfo, BridgeSessionSnapshot, SystemStatusSnapshot, DispatchOptions } from './bridge.js';
+import { RELAY_PROTOCOL_VERSION } from './bridge.js';
+import { currentRequestContext } from './request-context.js';
 import {
   type CapSession,
   applyAck,
@@ -181,6 +183,7 @@ interface PendingRequest {
  * for the whole MCP-server-cluster.
  */
 type FollowerFrame =
+  | { role: 'follower-hello'; relayProtocol: number; version?: string }
   | { role: 'req'; id: string; type: string; args: Record<string, unknown> }
   | { role: 'req-dispatch'; id: string; tool: string; args: Record<string, unknown> }
   | { role: 'client-info'; name: string; version: string };
@@ -189,7 +192,7 @@ type LeaderFrame =
   | { role: 'res'; id: string; success: boolean; result?: unknown; error?: string }
   | { role: 'res-pending'; id: string; expectedTimeoutMs: number; reason?: string }
   | { role: 'push'; type: string; data: any }
-  | { role: 'status'; extensionConnected: boolean };
+  | { role: 'status'; relayProtocol?: number; extensionConnected: boolean; session?: BridgeSessionSnapshot };
 
 /**
  * Frame sent by the leader to the extension right after the extension
@@ -249,7 +252,7 @@ type ExtensionInboundV2 =
       // When the extension refuses with a typed reason
       // (MCP_CAP_EXCEEDED, MCP_AUTH_REQUIRED, etc.), it stamps the
       // JSON-RPC code + structured data so the server can rethrow as
-      // a real McpError to the IDE rather than a plain Error string.
+      // a real ProtocolError to the IDE rather than a plain Error string.
       error_code?: number;
       error_data?: unknown;
     }
@@ -286,6 +289,7 @@ export class ExtensionBridge implements Bridge {
   // (start in 'pending', resolved by init_session arrival or grace
   // timer fire). All cap decisions read from / write to this.
   private capSession: CapSession | null = null;
+  private systemStatus: SystemStatusSnapshot | null = null;
   // Pending dispatch_tool frames, keyed by seq_num. Holds the
   // resolve/reject of the in-flight dispatchTool() promise plus its
   // ack timeout handle.
@@ -495,7 +499,7 @@ export class ExtensionBridge implements Bridge {
     for (const [, pending] of this.dispatchPending) {
       clearTimeout(pending.timer);
       pending.reject(
-        new McpError(
+        new ProtocolError(
           ERROR_CODE_DISPATCH_TIMEOUT,
           `MCP dispatch aborted: extension disconnected (${reason}). Reconnect MCP from Customaise extension Settings.`,
           { type: 'dispatch_timeout', reason },
@@ -513,7 +517,7 @@ export class ExtensionBridge implements Bridge {
    * Follower → leader: relay a cap-enforced dispatchTool() call. The
    * leader runs it through its own dispatchTool (so the same
    * CapSession applies to every IDE connected to this MCP server
-   * cluster) and relays the result or McpError back to the follower
+   * cluster) and relays the result or ProtocolError back to the follower
    * preserving the JSON-RPC error code.
    */
   private async _handleFollowerDispatchRequest(
@@ -544,12 +548,30 @@ export class ExtensionBridge implements Bridge {
       const result = await this._dispatchToolWithOrigin(tool, args, ws, origId);
       this._sendToFollower(ws, { role: 'res', id: origId, success: true, result });
     } catch (err) {
-      // Preserve McpError code + data through the relay so the follower
-      // can re-throw a typed McpError to its IDE.
-      if (err instanceof McpError) {
+      // Preserve ProtocolError code + data through the relay so the follower
+      // can re-throw a typed ProtocolError to its IDE.
+      // Encode whenever the error carries anything a caller branches on,
+      // not only when it is a ProtocolError.
+      //
+      // The extension's typed refusals are deliberately PLAIN errors with
+      // `.data` (a ProtocolError would double-prefix the message in IDE
+      // popups, see the ack branch that builds them). Gating this on
+      // `instanceof ProtocolError` therefore dropped the type for every one
+      // of them the moment a follower was involved, which is the normal
+      // setup: an IDE holds the leader slot and the CLI daemon follows. That
+      // silently made `consent_denied`, `consent_timeout`, `not_found` and
+      // `invalid_argument` arrive as generic failures, so exits 6 and 7 were
+      // unreachable through the CLI in the configuration everybody runs.
+      const relayCode = err instanceof ProtocolError ? err.code : (err as { code?: unknown })?.code;
+      const relayData = (err as { data?: unknown })?.data;
+      if (typeof relayCode === 'number' || (relayData !== undefined && relayData !== null)) {
         this._sendToFollower(ws, {
           role: 'res', id: origId, success: false,
-          error: JSON.stringify({ code: err.code, message: err.message, data: err.data ?? null }),
+          error: JSON.stringify({
+            code: typeof relayCode === 'number' ? relayCode : null,
+            message: (err as Error)?.message ?? 'dispatchTool failed',
+            data: relayData ?? null,
+          }),
         });
       } else {
         this._sendToFollower(ws, {
@@ -566,7 +588,7 @@ export class ExtensionBridge implements Bridge {
     this.followerSockets.add(ws);
 
     // Send initial status so the follower knows whether the extension is live.
-    this._sendToFollower(ws, { role: 'status', extensionConnected: this.extensionSocket !== null });
+    this._sendToFollower(ws, { role: 'status', relayProtocol: RELAY_PROTOCOL_VERSION, extensionConnected: this.extensionSocket !== null, session: this.getSessionSnapshot() });
 
     ws.on('message', (data) => {
       try {
@@ -612,7 +634,7 @@ export class ExtensionBridge implements Bridge {
         if (dispatch.origin === ws) {
           clearTimeout(dispatch.timer);
           this.dispatchPending.delete(seqNum);
-          dispatch.reject(new McpError(
+          dispatch.reject(new ProtocolError(
             ERROR_CODE_DISPATCH_TIMEOUT,
             `MCP dispatch aborted: originating follower disconnected (tool=${dispatch.tool}).`,
             { type: 'follower_disconnected', tool: dispatch.tool },
@@ -647,6 +669,24 @@ export class ExtensionBridge implements Bridge {
   private _handleFollowerMessage(ws: WebSocket, message: FollowerFrame): void {
     if (!message || typeof message !== 'object') {
       this._log('Follower sent non-object frame');
+      return;
+    }
+    // The relay contract, enforced at the door. A follower built against a
+    // different frame vocabulary must not be served: every shared frame after
+    // this one would have undefined semantics, and undefined-silently is the
+    // failure mode this constant exists to kill. The follower gets a close
+    // reason it can surface verbatim. See RELAY_PROTOCOL_VERSION in bridge.ts.
+    if (message.role === 'follower-hello') {
+      if (message.relayProtocol !== RELAY_PROTOCOL_VERSION) {
+        this._log(
+          `Evicting follower: relay protocol ${message.relayProtocol} != ${RELAY_PROTOCOL_VERSION}` +
+          (message.version ? ` (follower version ${message.version})` : ''));
+        try {
+          ws.close(4001,
+            `relay_protocol_mismatch: leader speaks ${RELAY_PROTOCOL_VERSION}, follower speaks ` +
+            `${message.relayProtocol}. Restart the older of the two processes.`);
+        } catch { /* already closing */ }
+      }
       return;
     }
     if (message.role === 'client-info') {
@@ -687,9 +727,17 @@ export class ExtensionBridge implements Bridge {
     const args = (rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs)) ? rawArgs as Record<string, unknown> : {};
 
     if (!this.extensionSocket || this.extensionSocket.readyState !== WebSocket.OPEN) {
+      // Encoded the same way the dispatch relay encodes a ProtocolError,
+      // so the follower rehydrates a typed error rather than a bare one.
+      // Without this the follower's CLI reports exit 1 ("unknown") for the
+      // single most common failure there is: Chrome is not running.
       this._sendToFollower(ws, {
         role: 'res', id: origId, success: false,
-        error: 'Customaise extension is not connected. Make sure Chrome is running with the Customaise extension loaded.',
+        error: JSON.stringify({
+          code: ERROR_CODE_DISPATCH_TIMEOUT,
+          message: 'Customaise extension is not connected. Check that Chrome is running with the extension loaded, that MCP is enabled in Customaise Settings, and that you are signed in: signing out disables the bridge deliberately.',
+          data: { type: 'extension_not_connected' },
+        }),
       });
       return;
     }
@@ -704,7 +752,11 @@ export class ExtensionBridge implements Bridge {
       this.pending.delete(forwardId);
       this._sendToFollower(ws, {
         role: 'res', id: origId, success: false,
-        error: `Request to extension timed out after ${this.requestTimeoutMs}ms (type=${type}, id=${origId})`,
+        error: JSON.stringify({
+          code: ERROR_CODE_DISPATCH_TIMEOUT,
+          message: `Request to extension timed out after ${this.requestTimeoutMs}ms (type=${type}, id=${origId})`,
+          data: { type: 'dispatch_timeout' },
+        }),
       });
     }, this.requestTimeoutMs);
     this.pending.set(forwardId, {
@@ -722,10 +774,23 @@ export class ExtensionBridge implements Bridge {
    * Send a request to the extension and wait for the response.
    * Throws if the extension is not connected or the request times out.
    */
+  /**
+   * A disconnected extension has more than one cause, and the message used to
+   * name only the least likely one.
+   *
+   * Signing out of Customaise tears the bridge down on purpose
+   * (`signout-cleanup.js`, closing the account-switch bypass) and leaves
+   * `mcp_bridge_enabled: false` behind. So the commonest reason a developer
+   * sees this is not "Chrome is closed" but "I signed out" or "the toggle is
+   * still off from last time I did". Telling them to check Chrome sends them
+   * looking in the wrong place.
+   */
   async request(type: string, args: Record<string, unknown> = {}): Promise<unknown> {
     if (!this.extensionSocket || this.extensionSocket.readyState !== WebSocket.OPEN) {
-      throw new Error(
-        'Customaise extension is not connected. Make sure Chrome is running with the Customaise extension loaded.'
+      throw new ProtocolError(
+        ERROR_CODE_DISPATCH_TIMEOUT,
+        'Customaise extension is not connected. Check that Chrome is running with the extension loaded, that MCP is enabled in Customaise Settings, and that you are signed in: signing out disables the bridge deliberately.',
+        { type: 'extension_not_connected' },
       );
     }
 
@@ -734,7 +799,11 @@ export class ExtensionBridge implements Bridge {
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`Request to extension timed out after ${this.requestTimeoutMs}ms (type=${type}, id=${id})`));
+        reject(new ProtocolError(
+          ERROR_CODE_DISPATCH_TIMEOUT,
+          `Request to extension timed out after ${this.requestTimeoutMs}ms (type=${type}, id=${id})`,
+          { type: 'dispatch_timeout' },
+        ));
       }, this.requestTimeoutMs);
 
       this.pending.set(id, { origin: 'leader', resolve, reject, timer });
@@ -742,6 +811,47 @@ export class ExtensionBridge implements Bridge {
       const request: BridgeRequest = { id, type, args };
       this.extensionSocket!.send(JSON.stringify(request));
     });
+  }
+
+  /**
+   * Session facts for `doctor`. Reads the CapSession this leader already
+   * holds; costs nothing and never touches the extension.
+   */
+  getSystemStatus(): SystemStatusSnapshot | null {
+    return this.systemStatus;
+  }
+
+  /** Adopt a reported gate state, telling followers only on a real change. */
+  private _adoptSystemStatus(next: SystemStatusSnapshot | null | undefined): void {
+    if (!next) return;
+    const before = this.systemStatus;
+    const changed = !before
+      || before.userScriptsDisabled !== next.userScriptsDisabled
+      || before.userScriptsApiAvailable !== next.userScriptsApiAvailable
+      || before.configureWorldApiAvailable !== next.configureWorldApiAvailable;
+    this.systemStatus = next;
+    if (changed) this._broadcastStatusToFollowers(this.isConnected);
+  }
+
+  getSessionSnapshot(): BridgeSessionSnapshot {
+    const s = this.capSession;
+    return {
+      extensionConnected: this.isConnected,
+      systemStatus: this.systemStatus,
+      tier: s?.tier ?? null,
+      authenticated: s?.authenticated ?? null,
+      remoteApprovals: s?.remoteApprovals ?? null,
+      capMode: s?.mode ?? null,
+      // Counters are meaningless for an unlimited session; reporting zeros
+      // there would read as "no usage" rather than "not applicable".
+      dailyUsed: s && s.mode !== 'unlimited' ? s.dailyUsed : null,
+      dailyCap: s && s.mode !== 'unlimited' ? s.dailyCap : null,
+      weeklyUsed: s && s.mode !== 'unlimited' ? s.weeklyUsed : null,
+      weeklyCap: s && s.mode !== 'unlimited' ? s.weeklyCap : null,
+      // Trivially our own here; the value earns its keep on the follower,
+      // which relays this snapshot verbatim. See the field's JSDoc.
+      leaderVersion: MCP_VERSION,
+    };
   }
 
   /**
@@ -894,8 +1004,15 @@ export class ExtensionBridge implements Bridge {
         const stillPending = this.pending.get(v1.id!);
         if (!stillPending) return;
         this.pending.delete(v1.id!);
-        stillPending.reject(new Error(
-          `Request to extension timed out after ${extendMs}ms (type=consent-pending, id=${v1.id})`
+        // Our own extended timer fired, not the extension reporting back.
+        // That does not prove the user declined to answer, so this is
+        // `dispatch_timeout` (stop) rather than `consent_timeout` (retry
+        // once) — the extension's real consent-timeout ack carries the
+        // latter and is the only thing entitled to claim it.
+        stillPending.reject(new ProtocolError(
+          ERROR_CODE_DISPATCH_TIMEOUT,
+          `Request to extension timed out after ${extendMs}ms (type=consent-pending, id=${v1.id})`,
+          { type: 'dispatch_timeout' },
         ));
       }, extendMs);
       // Also relay the pending frame to the originating follower so it
@@ -962,7 +1079,14 @@ export class ExtensionBridge implements Bridge {
       clearTimeout(this.graceTimer);
       this.graceTimer = null;
     }
+    this._adoptSystemStatus((payload as { system_status?: SystemStatusSnapshot }).system_status);
     this.capSession = applyInitSession(this.capSession, payload);
+    // Followers learn the session HERE, not from the connect-time status
+    // frame: that one fires before the CapSession exists, so without this a
+    // follower would hold an empty snapshot for the life of the connection
+    // and `doctor` would report every field as unknown. init_session is also
+    // rebroadcast on tier change, so this keeps followers current.
+    this._broadcastStatusToFollowers(this.isConnected);
     this._log(
       `init_session adopted: mode=${this.capSession.mode} tier=${payload.tier ?? 'unspecified'} ` +
       `unlimited=${payload.unlimited === true} dailyUsed=${this.capSession.dailyUsed}/${this.capSession.dailyCap} ` +
@@ -994,7 +1118,14 @@ export class ExtensionBridge implements Bridge {
     this.dispatchPending.delete(ack.seq_num);
     clearTimeout(pending.timer);
 
+    // The master-gate state rides in on every ack, so it stays fresh without
+    // anyone spending a cap unit to ask. Followers are told only when it
+    // actually changes: that is a Chrome restart or a user toggling the
+    // switch, not something worth a broadcast per dispatch.
+    this._adoptSystemStatus((ack as { system_status?: SystemStatusSnapshot | null }).system_status);
+
     if (this.capSession) {
+      const usedBefore = this.capSession.dailyUsed;
       const outcome = applyAck(this.capSession, ack, pending.tool);
       this.capSession = outcome.session;
       if (outcome.kind === 'integrity_violation') {
@@ -1005,13 +1136,25 @@ export class ExtensionBridge implements Bridge {
           this._log(`Failed to send report_integrity_error: ${(err as Error).message}`);
         }
         pending.reject(
-          new McpError(
+          new ProtocolError(
             ERROR_CODE_INTEGRITY_VIOLATION,
             'MCP integrity check failed: extension counter went backwards. Reconnect MCP from Customaise extension Settings.',
             { type: 'integrity_violation', tool: pending.tool, serverCountBefore: outcome.serverCountBefore, ackCounter: outcome.ackCounter },
           ),
         );
         return;
+      }
+      // Followers hold a COPY of this session, relayed on the status frame.
+      // Without this the copy froze at connect time: the counters advance on
+      // every ack and nothing re-broadcast them, so `customaise doctor` on a
+      // follower reported "0/50 today" no matter how much had been spent.
+      // A stale headroom figure is worse than none, because an agent trusts
+      // it and plans against it.
+      //
+      // Only on an actual change, which means successful dispatches: a failed
+      // one does not count (ARD 4.1) and must not cost a broadcast either.
+      if (this.capSession.dailyUsed !== usedBefore) {
+        this._broadcastStatusToFollowers(this.isConnected);
       }
     }
 
@@ -1020,11 +1163,11 @@ export class ExtensionBridge implements Bridge {
     } else if (typeof ack.error_code === 'number') {
       // Extension refused with a typed JSON-RPC code (e.g.
       // MCP_AUTH_REQUIRED, MCP_CAP_EXCEEDED). Use a plain Error with
-      // code/data attached rather than McpError. The SDK's McpError
+      // code/data attached rather than ProtocolError. The SDK's ProtocolError
       // constructor prepends "MCP error <code>: " to .message, and
       // the SDK's Server.handleRequest serializes err.message directly
       // into the JSON-RPC response — then the client-side SDK
-      // reconstructs an McpError from that response, prepending the
+      // reconstructs an ProtocolError from that response, prepending the
       // prefix a SECOND time. That double-prefix is purely cosmetic
       // but it leaks into IDE error popups (Claude Code, Cursor, etc.)
       // as "MCP error -32029: MCP error -32029: Daily MCP cap reached…".
@@ -1037,7 +1180,17 @@ export class ExtensionBridge implements Bridge {
       err.data = ack.error_data ?? undefined;
       pending.reject(err);
     } else {
-      pending.reject(new Error(ack.error || `Tool '${pending.tool}' failed in extension`));
+      // No numeric code, but the extension may still have attached data.
+      // The consent gate does exactly that: a refusal carries
+      // `{ type: 'consent_denied' | 'consent_timeout' | ... }` and no code,
+      // because the type is what a caller branches on. Dropping the data
+      // here made every consent outcome arrive as a generic failure, which
+      // is how two of the CLI's documented exit codes became unreachable.
+      const err: Error & { data?: unknown } = new Error(
+        ack.error || `Tool '${pending.tool}' failed in extension`,
+      );
+      if (ack.error_data !== undefined && ack.error_data !== null) err.data = ack.error_data;
+      pending.reject(err);
     }
   }
 
@@ -1069,7 +1222,7 @@ export class ExtensionBridge implements Bridge {
       if (!this.dispatchPending.has(frame.seq_num)) return;
       this.dispatchPending.delete(frame.seq_num);
       pending.reject(
-        new McpError(
+        new ProtocolError(
           ERROR_CODE_DISPATCH_TIMEOUT,
           `MCP dispatch timed out after ${extendMs}ms (tool=${pending.tool}, awaiting user consent). The user did not approve in time; retry the call.`,
           { type: 'dispatch_timeout', tool: pending.tool, timeoutMs: extendMs, reason: 'awaiting_user_consent' },
@@ -1104,8 +1257,12 @@ export class ExtensionBridge implements Bridge {
    *   4. Modern session: send dispatch_tool frame, await dispatch_ack,
    *      adopt counter from ack.
    */
-  async dispatchTool(toolName: string, args: Record<string, unknown> = {}): Promise<unknown> {
-    return this._dispatchToolWithOrigin(toolName, args, 'leader', undefined);
+  async dispatchTool(
+    toolName: string,
+    args: Record<string, unknown> = {},
+    opts: DispatchOptions = {},
+  ): Promise<unknown> {
+    return this._dispatchToolWithOrigin(toolName, args, 'leader', undefined, opts);
   }
 
   /**
@@ -1120,11 +1277,12 @@ export class ExtensionBridge implements Bridge {
     args: Record<string, unknown>,
     origin: 'leader' | WebSocket,
     followerOrigId: string | undefined,
+    opts: DispatchOptions = {},
   ): Promise<unknown> {
     if (!this.extensionSocket || this.extensionSocket.readyState !== WebSocket.OPEN) {
-      throw new McpError(
+      throw new ProtocolError(
         ERROR_CODE_DISPATCH_TIMEOUT,
-        'Customaise extension is not connected. Make sure Chrome is running with the Customaise extension loaded.',
+        'Customaise extension is not connected. Check that Chrome is running with the extension loaded, that MCP is enabled in Customaise Settings, and that you are signed in: signing out disables the bridge deliberately.',
         { type: 'extension_not_connected' },
       );
     }
@@ -1137,7 +1295,7 @@ export class ExtensionBridge implements Bridge {
 
     if (!this.capSession) {
       // Extension disconnected during the wait.
-      throw new McpError(
+      throw new ProtocolError(
         ERROR_CODE_DISPATCH_TIMEOUT,
         'Customaise extension disconnected during MCP dispatch. Reconnect from Settings.',
         { type: 'extension_disconnected' },
@@ -1156,11 +1314,7 @@ export class ExtensionBridge implements Bridge {
     // (returns allow:true for 'unlimited' mode).
     const decision = decideDispatch(this.capSession, now);
     if (decision.allow === false) {
-      // Explicit narrowing helper: TS's discriminated-union narrowing
-      // on `if (!decision.allow)` doesn't kick in under tsconfig.test's
-      // strict:false setting, so we name the narrow variant directly.
-      const denied = decision as Extract<typeof decision, { allow: false }>;
-      throw new McpError(denied.code, denied.message, denied.data);
+      throw new ProtocolError(decision.code, decision.message, decision.data);
     }
 
     // Legacy mode: one-time deprecation error, then proceed via v1
@@ -1168,7 +1322,7 @@ export class ExtensionBridge implements Bridge {
     if (this.capSession.mode === 'legacy') {
       if (!this.capSession.deprecationErrorSent) {
         this.capSession = { ...this.capSession, deprecationErrorSent: true };
-        throw new McpError(
+        throw new ProtocolError(
           ERROR_CODE_EXTENSION_OUTDATED,
           'Customaise extension out of date for the v2 MCP bridge. Update the extension from chrome://extensions for full MCP support; subsequent calls will use limited Free-tier behaviour.',
           { type: 'extension_outdated', minExtensionVersion: MIN_EXTENSION_VERSION },
@@ -1200,7 +1354,7 @@ export class ExtensionBridge implements Bridge {
         if (!this.dispatchPending.has(seqNum)) return;
         this.dispatchPending.delete(seqNum);
         reject(
-          new McpError(
+          new ProtocolError(
             ERROR_CODE_DISPATCH_TIMEOUT,
             `MCP dispatch timed out after ${DISPATCH_ACK_TIMEOUT_MS}ms (tool=${toolName}). The extension may be unresponsive; reload the target tab and retry.`,
             { type: 'dispatch_timeout', tool: toolName, timeoutMs: DISPATCH_ACK_TIMEOUT_MS },
@@ -1209,6 +1363,34 @@ export class ExtensionBridge implements Bridge {
       }, DISPATCH_ACK_TIMEOUT_MS);
 
       this.dispatchPending.set(seqNum, { resolve, reject, timer, tool: toolName, origin, followerOrigId });
+
+      // Caller abandoned the request (Ctrl-C on the CLI, a cancelled IDE
+      // call). Tell the extension so it closes the consent modal this
+      // dispatch was waiting on, rather than leaving it open for its full
+      // five minutes with nobody coming back for the answer.
+      const signal = opts.signal ?? currentRequestContext().signal;
+      if (signal) {
+        const onAbort = () => {
+          if (!this.dispatchPending.has(seqNum)) return;
+          this.dispatchPending.delete(seqNum);
+          clearTimeout(timer);
+          try {
+            this.extensionSocket?.send(JSON.stringify({
+              type: 'cancel_dispatch',
+              session_id: sessionId,
+              seq_num: seqNum,
+              reason: 'caller cancelled the request',
+            }));
+          } catch { /* the socket going away has the same effect */ }
+          reject(new ProtocolError(
+            ERROR_CODE_DISPATCH_TIMEOUT,
+            `Dispatch cancelled by the caller (tool=${toolName}).`,
+            { type: 'dispatch_cancelled', tool: toolName },
+          ));
+        };
+        if (signal.aborted) { onAbort(); return; }
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
 
       const frame = {
         type: 'dispatch_tool' as const,
@@ -1223,7 +1405,7 @@ export class ExtensionBridge implements Bridge {
         this.dispatchPending.delete(seqNum);
         clearTimeout(timer);
         reject(
-          new McpError(
+          new ProtocolError(
             ERROR_CODE_DISPATCH_TIMEOUT,
             `Failed to send dispatch_tool to extension: ${(err as Error).message}`,
             { type: 'send_failed', tool: toolName },
@@ -1243,7 +1425,12 @@ export class ExtensionBridge implements Bridge {
 
   private _broadcastStatusToFollowers(extensionConnected: boolean): void {
     if (this.followerSockets.size === 0) return;
-    const frame: LeaderFrame = { role: 'status', extensionConnected };
+    const frame: LeaderFrame = {
+      role: 'status',
+      relayProtocol: RELAY_PROTOCOL_VERSION,
+      extensionConnected,
+      session: this.getSessionSnapshot(),
+    };
     for (const f of this.followerSockets) {
       this._sendToFollower(f, frame);
     }

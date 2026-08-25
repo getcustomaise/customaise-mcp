@@ -1,5 +1,13 @@
-node_modules/
-dist/
-test-out/
-*.tgz
-.DS_Store
+test-scripts/
+
+# MCPB Desktop Extension build artifacts
+mcpb/staging/
+customaise.mcpb
+dist-test/
+
+# Unpacked .mcpb bundle contents. The build writes to mcpb/staging/ and
+# emits customaise.mcpb; these appear only when a bundle is unpacked here
+# for inspection, and go stale the moment src/ changes.
+/server/
+/manifest.json
+/icon.png

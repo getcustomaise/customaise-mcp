@@ -25,6 +25,7 @@ export const ERROR_CODE_CAP_EXCEEDED = -32029;
 export const ERROR_CODE_DISPATCH_TIMEOUT = -32030;
 export const ERROR_CODE_EXTENSION_OUTDATED = -32031;
 export const ERROR_CODE_INTEGRITY_VIOLATION = -32032;
+export const ERROR_CODE_RELAY_PROTOCOL_MISMATCH = -32033;
 
 /**
  * Semantic states for a session. The server-side cap behaviour branches
@@ -56,6 +57,14 @@ export interface CapSession {
   weeklyCap: number;
   /** UTC date string YYYY-MM-DD that dailyUsed corresponds to. UTC midnight rollover resets dailyUsed to 0. */
   dailyDateUtc: string;
+  /**
+   * Facts `doctor` reports, carried on init_session so reading them costs
+   * nothing. Every tool call spends a cap unit, so a diagnostic that had to
+   * dispatch would consume the headroom it exists to report on.
+   */
+  tier: string | null;
+  remoteApprovals: boolean | null;
+  authenticated: boolean | null;
   /** Monotonic seq_num for outgoing dispatch_tool frames. Increments on every dispatch attempt. */
   nextSeqNum: number;
   /** Has the server already sent the one-time "extension out of date" deprecation error to the IDE? */
@@ -75,6 +84,12 @@ export function createPendingSession(sessionId: string): CapSession {
     dailyDateUtc: utcDateString(new Date()),
     nextSeqNum: 1,
     deprecationErrorSent: false,
+    // Null until an init_session says otherwise: "we have not been told" is a
+    // different answer from "no", and `doctor` reports it as unknown rather
+    // than inventing a false.
+    tier: null,
+    remoteApprovals: null,
+    authenticated: null,
   };
 }
 
@@ -94,6 +109,8 @@ export function applyInitSession(
     install_id?: string;
     tier?: string;
     unlimited?: boolean;
+    remote_approvals?: boolean;
+    authenticated?: boolean;
     daily_cap?: number;
     weekly_cap?: number;
     current_used_daily?: number;
@@ -101,6 +118,9 @@ export function applyInitSession(
   },
 ): CapSession {
   const next: CapSession = { ...session };
+  if (typeof payload.tier === 'string') next.tier = payload.tier;
+  if (typeof payload.remote_approvals === 'boolean') next.remoteApprovals = payload.remote_approvals;
+  if (typeof payload.authenticated === 'boolean') next.authenticated = payload.authenticated;
   if (typeof payload.session_id === 'string' && payload.session_id.length > 0) {
     next.sessionId = payload.session_id;
   }

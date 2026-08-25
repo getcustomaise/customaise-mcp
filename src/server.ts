@@ -1,4 +1,4 @@
-import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
 import { z } from 'zod';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -11,11 +11,22 @@ import { tmpdir, homedir } from 'node:os';
  * - Antigravity: cwd is '/' → falls back to homedir
  */
 function getWorkspaceDir(): string {
-  // Escape hatch for edge cases
+  // 1. What the caller declared for THIS request. Only the CLI sets it, and
+  //    it must win: the daemon it talks to was spawned from some other
+  //    directory entirely and would otherwise scatter context files
+  //    somewhere the user cannot see.
+  const declared = currentRequestContext().workspaceDir;
+  if (declared && declared !== '/' && declared !== '') {
+    return declared;
+  }
+  // 2. The documented escape hatch. The public install instructions tell
+  //    Antigravity users to set this because its cwd is unreliable, so it
+  //    must keep beating cwd exactly as it does today.
   const envWorkspace = process.env.CUSTOMAISE_WORKSPACE;
   if (envWorkspace && envWorkspace !== '/' && envWorkspace !== '') {
     return envWorkspace;
   }
+  // 3. The spawning IDE's project directory.
   const cwd = process.cwd();
   if (cwd === '/' || cwd === '') {
     return homedir();
@@ -25,6 +36,45 @@ function getWorkspaceDir(): string {
 
 import type { Bridge } from './bridge.js';
 import { FileWatcher } from './file-watcher.js';
+import { currentRequestContext } from './request-context.js';
+import {
+  asKB,
+  fileModeHint,
+  inlineBudgetBytes,
+  inlineHint,
+  inlineImageBudgetBytes,
+  parseDataUrl,
+  outputParamDescription,
+  pruneToBudget,
+  resolveDelivery,
+} from './context-delivery.js';
+
+/**
+ * Shape a dispatch result for `structuredContent`.
+ *
+ * `structuredContent` was object-typed before 2026-07-28 and is any JSON
+ * value after it, and the SDK papers over the difference by wrapping a
+ * non-object as `{ result }` on a legacy connection and passing it through
+ * bare on a modern one. Measured: the same array arrives as
+ * `{"result":[...]}` or `[...]` depending on what the client negotiated.
+ *
+ * That would make a caller's data shape depend on protocol negotiation,
+ * which is not something a caller should have to reason about. So we wrap
+ * non-objects ourselves and the shape is the same on both eras. Callers
+ * unwrap a lone `result` key; the CLI does exactly that.
+ */
+export function asStructuredContent(result: unknown): Record<string, unknown> {
+  const isPlainObject = typeof result === 'object' && result !== null && !Array.isArray(result);
+  if (!isPlainObject) return { result };
+  // A result that IS `{ result: x }` gets wrapped too, so the caller's single
+  // unwrap lands on the original rather than one level too deep. No handler
+  // returns that shape today; wrapping it anyway means the round trip is
+  // lossless for every input instead of for every input we happen to have.
+  const keys = Object.keys(result as Record<string, unknown>);
+  if (keys.length === 1 && keys[0] === 'result') return { result };
+  return result as Record<string, unknown>;
+}
+
 
 /**
  * Register all MCP tools with the server.
@@ -38,7 +88,22 @@ import { FileWatcher } from './file-watcher.js';
  * `bridge.request` for a "lightweight" call, the answer is no — read
  * the JSDoc on `Bridge.request` for the reasoning.
  */
-export function registerTools(server: McpServer, bridge: Bridge, fileWatcher?: FileWatcher): void {
+/**
+ * Where an unsolicited push should be written, or why it cannot be.
+ *
+ * A push has no request behind it and carries no workspace of its own, so
+ * with several CLIs live the destination is genuinely unknowable. Declining
+ * with a reason beats picking one: a `.dom.md` in the wrong project is a
+ * silent wrong answer, and silence is the failure mode worth designing out.
+ */
+export type PushTarget = { dir: string } | { dir: null; reason: string };
+
+export function registerTools(
+  server: McpServer,
+  bridge: Bridge,
+  fileWatcher?: FileWatcher,
+  resolvePushTarget?: () => PushTarget,
+): void {
 
   // ─── Master-gate detection (Round-33 follow-up) ─────────────────────
   // The "Allow user scripts" toggle on chrome://extensions resets on every
@@ -70,45 +135,69 @@ export function registerTools(server: McpServer, bridge: Bridge, fileWatcher?: F
     `\n` +
     `────────────────────────────────────────────────────────────────────\n\n`
   );
-  async function checkUserScriptsGate(): Promise<{ disabled: boolean; warning: string }> {
-    try {
-      const status = await bridge.dispatchTool('get_system_status', {}) as {
-        userScriptsDisabled?: boolean;
-        available?: boolean;
-      };
-      if (status && status.available && status.userScriptsDisabled) {
-        return { disabled: true, warning: GATE_WARNING_HEADER };
-      }
-    } catch {
-      // Fail-open — see helper comment.
+  /**
+   * The master-gate banner, read rather than fetched.
+   *
+   * This used to be `dispatchTool('get_system_status')`, which spends a cap
+   * unit. Five tools call it on every invocation: `list_scripts`,
+   * `export_script`, `reload_tab`, `list_webmcp_tools` and
+   * `call_webmcp_tool`. So the documented loop (install, reload, list, call)
+   * billed EIGHT units instead of four, and the free tier's real budget for
+   * the workflow the product is built around was half what it advertises.
+   *
+   * The extension now attaches this state to every `dispatch_ack` and to
+   * `init_session`, so it is fresher than a cached fetch would be and costs
+   * nothing. Still fail-open: an unknown gate must not manufacture a warning.
+   */
+  /**
+   * Attach the master-gate state to a structured result.
+   *
+   * The banner used to reach the `content` half only, which a model reads.
+   * The CLI parses `structuredContent`, deliberately kept as clean JSON, so a
+   * terminal agent got total silence in exactly the situation the banner
+   * exists for: scripts install fine, no tool ever registers, and nothing
+   * anywhere says the "Allow user scripts" toggle is off. That toggle resets
+   * on every Chrome restart, so it is not an edge case.
+   *
+   * A separate field rather than prose prepended to the JSON, because
+   * prepending is what broke `JSON.parse` and made the CLI emit the whole
+   * ASCII banner as its data.
+   */
+  function withGate(result: unknown, gate: { disabled: boolean }): Record<string, unknown> {
+    const structured = asStructuredContent(result);
+    return gate.disabled ? { ...structured, userScriptsDisabled: true } : structured;
+  }
+
+  function checkUserScriptsGate(): { disabled: boolean; warning: string } {
+    const status = bridge.getSystemStatus();
+    if (status && status.available && status.userScriptsDisabled) {
+      return { disabled: true, warning: GATE_WARNING_HEADER };
     }
     return { disabled: false, warning: '' };
   }
 
   // ─── Script Lifecycle ───────────────────────────────────────────────
 
-  server.tool(
-    'list_scripts',
-    'List all scripts (UserScripts & AgentScripts) installed in Customaise with their IDs, names, enabled status, match patterns, and whether they are shared (subscribed). Scripts marked isShared are read-only subscriptions — they cannot be imported, exported, or deleted directly. To edit a shared script, call import_script with fork:true (creates an independent editable copy). To uninstall a shared script, the user must unsubscribe from the extension UI.',
-    {},
-    { title: 'List scripts', readOnlyHint: true, openWorldHint: false },
-    async () => {
-      const [result, gate] = await Promise.all([
-        bridge.dispatchTool('list_scripts', {}),
-        checkUserScriptsGate()
-      ]);
-      return {
-        content: [{
-          type: 'text' as const,
-          text: gate.warning + JSON.stringify(result, null, 2)
-        }]
-      };
-    }
-  );
+  server.registerTool('list_scripts', { description: 'List all scripts (UserScripts & AgentScripts) installed in Customaise with their IDs, names, enabled status, match patterns, and whether they are shared (subscribed). Scripts marked isShared are read-only subscriptions — they cannot be imported, exported, or deleted directly. To edit a shared script, call import_script with fork:true (creates an independent editable copy). To uninstall a shared script, the user must unsubscribe from the extension UI.', inputSchema: z.object({}), annotations: { title: 'List scripts', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } }, async () => {
+              const result = await bridge.dispatchTool('list_scripts', {});
+              const gate = checkUserScriptsGate();
+              return {
+                // Two readers, two halves. The model reads `content`, where the
+                // master-gate banner belongs because it is advice a human
+                // needs relayed. A CLI parses `structuredContent`, which must
+                // stay clean JSON: prepending the banner to the text made
+                // `JSON.parse` fail, so the CLI emitted the whole ASCII
+                // banner as its data. That fires whenever the "Allow user
+                // scripts" toggle is off, i.e. after every Chrome restart.
+                structuredContent: withGate(result, gate),
+                content: [{
+                  type: 'text' as const,
+                  text: gate.warning + JSON.stringify(result, null, 2)
+                }]
+              };
+            });
 
-  server.tool(
-    'import_script',
-    `Import a Customaise script (UserScript or AgentScript) to a local file for editing. The file contains the full source with metadata block. After editing with your IDE tools, use export_script to push changes back.
+  server.registerTool('import_script', { description: `Import a Customaise script (UserScript or AgentScript) to a local file for editing. The file contains the full source with metadata block. After editing with your IDE tools, use export_script to push changes back.
 
 Optional 'fork' flag (default false): when set to true, the script is FORKED into a new independent local copy BEFORE import, and the FORK is what gets written to the file. ALWAYS creates a new script — symmetric across source types, never a silent no-op:
   - Subscribed/shared sources: "Fork" verb. Clears the subscription link (no more publisher updates), captures forkedFrom lineage so a later publish can render "Forked from <original>" on the marketplace.
@@ -117,153 +206,141 @@ Forked/duplicated scripts land DISABLED in the user's library (D10 trust ceremon
 
 Without 'fork', subscribed scripts cannot be imported — they're read-only and the call refuses with a clear error pointing at fork:true. Owned scripts import normally (edit-in-place workflow).
 
-IMPORTANT: Save files inside your current workspace or project directory (e.g., ./customaise-scripts/), never in /tmp.`,
-    {
-      scriptId: z.string().describe('The ID of the script to import (get from list_scripts). When fork=true, this is the source script to fork from; the returned scriptId is the new fork.'),
-      filePath: z.string().describe('Local file path inside your workspace to write the script to (e.g., ./customaise-scripts/my-script.agent.js). Do NOT use /tmp.'),
-      fork: z.boolean().optional().describe('When true, fork the script into a new editable copy and import THAT copy. Always creates a new script (Fork for shared sources, Duplicate for owned). Required for subscribed/shared scripts. Default false.')
-    },
-    // readOnlyHint:false because fork=true creates a new script (state-mutating);
-    // the hint applies to the tool surface, not per-invocation.
-    { title: 'Import script', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-    async ({ scriptId, filePath, fork }) => {
-      // Fork branch — dispatch fork_script first; the new scriptId
-      // is what we hand to the import dispatch below. SW handler
-      // mirrors the extension UI's Fork helper (identity-clearing,
-      // unique-name, D9 lineage when shared, D10 disabled-by-default).
-      let effectiveScriptId = scriptId;
-      interface ForkOutcome {
-        success: boolean;
-        scriptId: string;
-        name: string;
-        scriptType?: string;
-        wasShared?: boolean;
-        wasPublished?: boolean;
-        forkedFrom?: unknown;
-      }
-      let forkOutcome: ForkOutcome | null = null;
-      if (fork === true) {
-        forkOutcome = await bridge.dispatchTool('fork_script', { scriptId }) as ForkOutcome;
-        effectiveScriptId = forkOutcome.scriptId;
-      }
+IMPORTANT: Save files inside your current workspace or project directory (e.g., ./customaise-scripts/), never in /tmp.`, inputSchema: z.object({
+              scriptId: z.string().describe('The ID of the script to import (get from list_scripts). When fork=true, this is the source script to fork from; the returned scriptId is the new fork.'),
+              filePath: z.string().describe('Local file path inside your workspace to write the script to (e.g., ./customaise-scripts/my-script.agent.js). Do NOT use /tmp.'),
+              fork: z.boolean().optional().describe('When true, fork the script into a new editable copy and import THAT copy. Always creates a new script (Fork for shared sources, Duplicate for owned). Required for subscribed/shared scripts. Default false.')
+            }), annotations: { title: 'Import script', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false } }, async ({ scriptId, filePath, fork }) => {
+              // Fork branch — dispatch fork_script first; the new scriptId
+              // is what we hand to the import dispatch below. SW handler
+              // mirrors the extension UI's Fork helper (identity-clearing,
+              // unique-name, D9 lineage when shared, D10 disabled-by-default).
+              let effectiveScriptId = scriptId;
+              interface ForkOutcome {
+                success: boolean;
+                scriptId: string;
+                name: string;
+                scriptType?: string;
+                wasShared?: boolean;
+                wasPublished?: boolean;
+                forkedFrom?: unknown;
+              }
+              let forkOutcome: ForkOutcome | null = null;
+              if (fork === true) {
+                forkOutcome = await bridge.dispatchTool('fork_script', { scriptId }) as ForkOutcome;
+                effectiveScriptId = forkOutcome.scriptId;
+              }
 
-      const result = await bridge.dispatchTool('import_script', { scriptId: effectiveScriptId }) as {
-        scriptId: string;
-        source: string;
-        metadata: Record<string, unknown>;
-      };
+              const result = await bridge.dispatchTool('import_script', { scriptId: effectiveScriptId }) as {
+                scriptId: string;
+                source: string;
+                metadata: Record<string, unknown>;
+              };
 
-      // File-write atomicity. If we just forked and the import
-      // succeeded but the local file-write fails (disk full,
-      // permission denied, invalid path), the fork is durable in
-      // the user's library but the agent gets an exception with no
-      // path forward. Surface the fork's scriptId in the error so
-      // the agent knows it CAN re-call import_script with that
-      // scriptId (and no `fork` flag) to retry just the file-write
-      // step — no second fork created.
-      try {
-        mkdirSync(dirname(filePath), { recursive: true });
-        writeFileSync(filePath, result.source, 'utf-8');
-      } catch (fsErr) {
-        const msg = (fsErr as Error)?.message || String(fsErr);
-        if (forkOutcome) {
-          throw new Error(
-            `Fork created (scriptId: ${forkOutcome.scriptId}, name: "${forkOutcome.name}") ` +
-            `but file-write to ${filePath} failed: ${msg}. ` +
-            `To recover: call import_script again with scriptId: "${forkOutcome.scriptId}" ` +
-            `(no fork option) to write the file. The fork itself is durable.`,
-          );
-        }
-        throw fsErr;
-      }
+              // File-write atomicity. If we just forked and the import
+              // succeeded but the local file-write fails (disk full,
+              // permission denied, invalid path), the fork is durable in
+              // the user's library but the agent gets an exception with no
+              // path forward. Surface the fork's scriptId in the error so
+              // the agent knows it CAN re-call import_script with that
+              // scriptId (and no `fork` flag) to retry just the file-write
+              // step — no second fork created.
+              try {
+                mkdirSync(dirname(filePath), { recursive: true });
+                writeFileSync(filePath, result.source, 'utf-8');
+              } catch (fsErr) {
+                const msg = (fsErr as Error)?.message || String(fsErr);
+                if (forkOutcome) {
+                  throw new Error(
+                    `Fork created (scriptId: ${forkOutcome.scriptId}, name: "${forkOutcome.name}") ` +
+                    `but file-write to ${filePath} failed: ${msg}. ` +
+                    `To recover: call import_script again with scriptId: "${forkOutcome.scriptId}" ` +
+                    `(no fork option) to write the file. The fork itself is durable.`,
+                  );
+                }
+                throw fsErr;
+              }
 
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({
-            success: true,
-            filePath,
-            scriptId: result.scriptId,
-            metadata: result.metadata,
-            bytesWritten: Buffer.byteLength(result.source, 'utf-8'),
-            ...(forkOutcome ? {
-              forked: true,
-              originalScriptId: scriptId,
-              forkVerb: forkOutcome.wasShared ? 'Fork' : 'Duplicate',
-              forkedFrom: forkOutcome.forkedFrom ?? null,
-              newScriptName: forkOutcome.name,
-              note: 'Forked/duplicated script lands DISABLED. User reviews + enables explicitly per the D10 trust ceremony.',
-            } : {}),
-          }, null, 2)
-        }]
-      };
-    }
-  );
+              return {
+                content: [{
+                  type: 'text' as const,
+                  text: JSON.stringify({
+                    success: true,
+                    filePath,
+                    scriptId: result.scriptId,
+                    metadata: result.metadata,
+                    bytesWritten: Buffer.byteLength(result.source, 'utf-8'),
+                    ...(forkOutcome ? {
+                      forked: true,
+                      originalScriptId: scriptId,
+                      forkVerb: forkOutcome.wasShared ? 'Fork' : 'Duplicate',
+                      forkedFrom: forkOutcome.forkedFrom ?? null,
+                      newScriptName: forkOutcome.name,
+                      note: 'Forked/duplicated script lands DISABLED. User reviews + enables explicitly per the D10 trust ceremony.',
+                    } : {}),
+                  }, null, 2)
+                }]
+              };
+            });
 
-  server.tool(
-    'export_script',
-    `Export a script from a local file into Customaise. The file will be validated through Customaise's sanitization pipeline (syntax checking, AST validation, security analysis). If valid, the script is installed and ready to execute on matching pages. If invalid, detailed diagnostics explain exactly what to fix. Pass scriptId to update an existing script instead of creating a new one. NOTE: You cannot overwrite a shared/subscribed script — they are read-only. If you need to edit a shared script, first call import_script with fork:true (creates an editable independent copy), then export to that copy's scriptId.
+  server.registerTool('export_script', { description: `Export a script from a local file into Customaise. The file will be validated through Customaise's sanitization pipeline (syntax checking, AST validation, security analysis). If valid, the script is installed and ready to execute on matching pages. If invalid, detailed diagnostics explain exactly what to fix. Pass scriptId to update an existing script instead of creating a new one. NOTE: You cannot overwrite a shared/subscribed script — they are read-only. If you need to edit a shared script, first call import_script with fork:true (creates an editable independent copy), then export to that copy's scriptId.
 
     Reminder for UserScripts: Must use an IIFE with named functions for symbol-level editing, \`// @namespace https://customaise.com\`, and standard directives (@name, @match, @grant).
-    Reminder for AgentScripts: MUST use \`// ==AgentScript==\` block, MUST explicitly declare tools via \`// @webmcp <toolName> <permission>\` (e.g. \`// @webmcp my_tool prompt\`). Permissions: allow (autonomous), prompt (interactive), deny (blocked). Must NOT use IIFEs. CAN use GM_* APIs for persistence, networking, and observability alongside \`navigator.modelContext.registerTool()\`.`,
-    {
-      filePath: z.string().describe('Local file path containing the userscript source code'),
-      scriptId: z.string().optional().describe('ID of an existing script to update. Omit to create a new script.')
-    },
-    { title: 'Export script', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-    async ({ filePath, scriptId }) => {
-      const code = readFileSync(filePath, 'utf-8');
-      const [result, gate] = await Promise.all([
-        bridge.dispatchTool('export_script', { code, scriptId }),
-        checkUserScriptsGate()
-      ]);
-      return {
-        content: [{
-          type: 'text' as const,
-          text: gate.warning + JSON.stringify(result, null, 2)
-        }]
-      };
-    }
-  );
+    Reminder for AgentScripts: MUST use \`// ==AgentScript==\` block, MUST explicitly declare tools via \`// @webmcp <toolName> <permission>\` (e.g. \`// @webmcp my_tool prompt\`). Permissions: allow (autonomous), prompt (interactive), deny (blocked). Prefer \`prompt\`: in a script you write, \`allow\` resolves as \`prompt\` regardless. Must NOT use IIFEs. CAN use GM_* APIs for persistence, networking, and observability alongside \`navigator.modelContext.registerTool()\`.`, inputSchema: z.object({
+              filePath: z.string().describe('Local file path containing the userscript source code'),
+              scriptId: z.string().optional().describe('ID of an existing script to update. Omit to create a new script.')
+            }), annotations: { title: 'Export script', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false } }, async ({ filePath, scriptId }) => {
+              const code = readFileSync(filePath, 'utf-8');
+              const result = await bridge.dispatchTool('export_script', { code, scriptId });
+                const gate = checkUserScriptsGate();
+              return {
+                // Two readers, two halves. The model reads `content`, where the
+                // master-gate banner belongs because it is advice a human
+                // needs relayed. A CLI parses `structuredContent`, which must
+                // stay clean JSON: prepending the banner to the text made
+                // `JSON.parse` fail, so the CLI emitted the whole ASCII
+                // banner as its data. That fires whenever the "Allow user
+                // scripts" toggle is off, i.e. after every Chrome restart.
+                structuredContent: withGate(result, gate),
+                content: [{
+                  type: 'text' as const,
+                  text: gate.warning + JSON.stringify(result, null, 2)
+                }]
+              };
+            });
 
 
 
-  server.tool(
-    'delete_script',
-    'Permanently delete a script (UserScript or AgentScript) from Customaise. This action cannot be undone. NOTE: Shared/subscribed scripts cannot be deleted via MCP — the user must unsubscribe from the extension UI. Forks created via import_script(fork:true) are owned scripts and CAN be deleted via MCP.',
-    {
-      scriptId: z.string().describe('The ID of the script to delete')
-    },
-    { title: 'Delete script', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-    async ({ scriptId }) => {
-      const result = await bridge.dispatchTool('delete_script', { scriptId });
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify(result, null, 2)
-        }]
-      };
-    }
-  );
+  server.registerTool('delete_script', { description: 'Permanently delete a script (UserScript or AgentScript) from Customaise. This action cannot be undone. NOTE: Shared/subscribed scripts cannot be deleted via MCP — the user must unsubscribe from the extension UI. Forks created via import_script(fork:true) are owned scripts and CAN be deleted via MCP.', inputSchema: z.object({
+              scriptId: z.string().describe('The ID of the script to delete')
+            }), annotations: { title: 'Delete script', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false } }, async ({ scriptId }) => {
+              const result = await bridge.dispatchTool('delete_script', { scriptId });
+              return {
+                structuredContent: asStructuredContent(result),
+                content: [{
+                  type: 'text' as const,
+                  text: JSON.stringify(result, null, 2)
+                }]
+              };
+            });
 
-  server.tool(
-    'toggle_script',
-    'Enable or disable a userscript. Disabled scripts are not injected into matching pages. Use this to temporarily turn off a script without deleting it.',
-    {
-      scriptId: z.string().describe('The ID of the script to enable/disable'),
-      enabled: z.boolean().describe('true to enable, false to disable')
-    },
-    { title: 'Toggle script', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    async ({ scriptId, enabled }) => {
-      const result = await bridge.dispatchTool('set_script_enabled', { scriptId, enabled });
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify(result, null, 2)
-        }]
-      };
-    }
-  );
+  server.registerTool('toggle_script', { description: 'Enable or disable a userscript. Disabled scripts are not injected into matching pages. Use this to temporarily turn off a script without deleting it.', inputSchema: z.object({
+              scriptId: z.string().describe('The ID of the script to enable/disable'),
+              enabled: z.boolean().describe('true to enable, false to disable')
+            }), annotations: { title: 'Toggle script', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false } }, async ({ scriptId, enabled }) => {
+              const result = await bridge.dispatchTool('set_script_enabled', { scriptId, enabled });
+              // Gated: with the master toggle off this answers `enabled: true`
+              // for a script Chrome will not run, so an agent moves on to
+              // testing behaviour that cannot happen.
+              const gate = checkUserScriptsGate();
+              return {
+                structuredContent: withGate(result, gate),
+                content: [{
+                  type: 'text' as const,
+                  text: gate.warning + JSON.stringify(result, null, 2)
+                }]
+              };
+            });
 
   // ─── Browser Context ────────────────────────────────────────────────
   // These tools write full data to workspace files and return lightweight
@@ -271,576 +348,718 @@ IMPORTANT: Save files inside your current workspace or project directory (e.g., 
   // bloating the AI agent's context window. Files are overwritten on
   // each call so the agent always has the freshest snapshot.
 
-  server.tool(
-    'get_page_context',
-    'Get a DOM snapshot of the current page including URL, title, page structure, and visible elements. Use this to understand the page layout before writing userscripts that manipulate it. The full DOM snapshot is saved to .customaise/page-context.json in your workspace — use view_file or grep_search to read only what you need.',
-    {
-      tabId: z.number().optional().describe('Tab ID to inspect. Defaults to the active tab.')
-    },
-    { title: 'Get page context', readOnlyHint: true, openWorldHint: true },
-    async ({ tabId }) => {
-      const result = await bridge.dispatchTool('get_page_context', { tabId }) as Record<string, any>;
+  server.registerTool('get_page_context', { description: 'Get a DOM snapshot of the current page including URL, title, page structure, and visible elements. Use this to understand the page layout before writing userscripts that manipulate it. WRITES A FILE by default: the full snapshot goes to .customaise/page-context.json in your workspace and this call returns a summary plus the path, so a large page does not fill your context window. Read the file with view_file or grep_search. If you have no filesystem tool, pass output: "inline" to get the whole snapshot in the response and write nothing to disk.', inputSchema: z.object({
+              tabId: z.number().optional().describe('Tab ID to inspect. Defaults to the active tab.'),
+              output: z.enum(['auto', 'file', 'inline']).optional().describe(outputParamDescription('.customaise/ in your workspace'))
+            }), annotations: { title: 'Get page context', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true } }, async ({ tabId, output }) => {
+              const result = await bridge.dispatchTool('get_page_context', { tabId }) as Record<string, any>;
 
-      // Strip fields that are only for the extension's internal chat UI
-      delete result.displayContent;
-      delete result.tokenEstimate;
+              // Strip fields that are only for the extension's internal chat UI
+              delete result.displayContent;
+              delete result.tokenEstimate;
 
-      // Write full context to workspace file (overwrite each time)
-      const contextDir = join(getWorkspaceDir(), '.customaise');
-      mkdirSync(contextDir, { recursive: true });
-      const filePath = join(contextDir, 'page-context.json');
-      const fullJson = JSON.stringify(result, null, 2);
-      writeFileSync(filePath, fullJson, 'utf-8');
+              // The digest both modes carry. The extension's
+              // page-context-runtime returns componentsSummary
+              // (buttons/forms/tables/links/inputs/headers/images/modals with
+              // counts + sample selectors) and overview.counts. The legacy
+              // `result.dom.elementCount` field does not exist; reading from
+              // the real fields is the fix for the "elementCount: 0" bug.
+              const overview = result.overview || {};
+              const summary = result.componentsSummary || {};
+              const counts = overview.counts || {};
 
-      // Build lightweight summary for the agent's context window.
-      // The extension's page-context-runtime returns componentsSummary
-      // (buttons/forms/tables/links/inputs/headers/images/modals with
-      // counts + sample selectors) and overview.counts. The legacy
-      // `result.dom.elementCount` field does not exist; reading from
-      // the real fields is the fix for the "elementCount: 0" bug.
-      const overview = result.overview || {};
-      const summary = result.componentsSummary || {};
-      const counts = overview.counts || {};
-      const fileSizeKB = (Buffer.byteLength(fullJson, 'utf-8') / 1024).toFixed(1);
+              const componentLine = (name: string, entry: any): string | null =>
+                entry?.count
+                  ? `${name}: ${entry.count}${
+                      entry.samples?.length
+                        ? ` (e.g. ${entry.samples.slice(0, 3).join(', ')})`
+                        : ''
+                    }`
+                  : null;
 
-      const componentLine = (name: string, entry: any): string | null =>
-        entry?.count
-          ? `${name}: ${entry.count}${
-              entry.samples?.length
-                ? ` (e.g. ${entry.samples.slice(0, 3).join(', ')})`
-                : ''
-            }`
-          : null;
+              // Kept on the inline branch too. An agent reading a shortened
+              // snapshot still gets the true counts here, so it can tell that
+              // what it is holding is a sample rather than the whole page.
+              const digest = {
+                url: overview.url ?? result.url ?? '',
+                title: overview.title ?? result.title ?? '',
+                detailTier: overview.detailTier,
+                components: [
+                  componentLine('buttons', summary.buttons),
+                  componentLine('forms', summary.forms),
+                  componentLine('tables', summary.tables),
+                  componentLine('inputs', summary.inputs),
+                  componentLine('headers', summary.headers),
+                  componentLine('images', summary.images),
+                  componentLine('modals', summary.modals),
+                  summary.links?.count ? `links: ${summary.links.count}` : null
+                ].filter(Boolean),
+                domCounts: counts,
+              };
 
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({
-            url: overview.url ?? result.url ?? '',
-            title: overview.title ?? result.title ?? '',
-            detailTier: overview.detailTier,
-            filePath,
-            fileSizeKB: `${fileSizeKB} KB`,
-            components: [
-              componentLine('buttons', summary.buttons),
-              componentLine('forms', summary.forms),
-              componentLine('tables', summary.tables),
-              componentLine('inputs', summary.inputs),
-              componentLine('headers', summary.headers),
-              componentLine('images', summary.images),
-              componentLine('modals', summary.modals),
-              summary.links?.count ? `links: ${summary.links.count}` : null
-            ].filter(Boolean),
-            domCounts: counts,
-            hint: 'Full DOM snapshot saved to the file above. Use view_file or grep_search to inspect specific elements, selectors, or text content without loading the entire snapshot.'
-          }, null, 2)
-        }]
-      };
-    }
-  );
+              const delivery = resolveDelivery(output);
 
-  server.tool(
-    'get_console_context',
-    'Get console logs from the browser, including errors, warnings, and userscript GM_log output. Use after reload_tab to check for script runtime errors. The full log data is saved to .customaise/console-context.json in your workspace — use view_file or grep_search to read only what you need.',
-    {
-      tabId: z.number().optional().describe('Tab ID to get logs from. Defaults to the active tab.'),
-      level: z.enum(['all', 'error', 'warn', 'info', 'debug']).optional().describe('Filter by log level. Default: all')
-    },
-    { title: 'Get console context', readOnlyHint: true, openWorldHint: true },
-    async ({ tabId, level }) => {
-      const result = await bridge.dispatchTool('get_console_context', { tabId }) as {
-        errors?: Array<Record<string, unknown>>;
-        warnings?: Array<Record<string, unknown>>;
-        userscriptLogs?: Array<Record<string, unknown>>;
-        summary?: Record<string, unknown>;
-        [key: string]: unknown;
-      };
+              // File mode falls back to inline on a write failure rather
+              // than throwing, because the dispatch has already run: the
+              // extension produced the snapshot and a cap unit is spent.
+              // The workspace path is a GUESS on some IDEs (see
+              // getWorkspaceDir), so the guess being unwritable must not
+              // discard data the caller has paid for. Same concern as
+              // import_script's file-write atomicity note above.
+              let fileWriteError: string | undefined;
+              if (delivery.mode === 'file') {
+                try {
+                  // Write full context to workspace file (overwrite each time)
+                  const contextDir = join(getWorkspaceDir(), '.customaise');
+                  mkdirSync(contextDir, { recursive: true });
+                  const filePath = join(contextDir, 'page-context.json');
+                  const fullJson = JSON.stringify(result, null, 2);
+                  writeFileSync(filePath, fullJson, 'utf-8');
 
-      // Strip fields that are only for the extension's internal chat UI
-      delete result.displayContent;
-      delete result.tokenEstimate;
+                  const payload = {
+                    delivery: 'file' as const,
+                    deliverySource: delivery.source,
+                    filePath,
+                    fileSizeKB: asKB(Buffer.byteLength(fullJson, 'utf-8')),
+                    ...digest,
+                    hint: fileModeHint(
+                      'get_page_context',
+                      'Full DOM snapshot',
+                      'Use view_file or grep_search to inspect specific elements, selectors, or text content without loading the entire snapshot.',
+                    ),
+                  };
+                  return {
+                    structuredContent: payload,
+                    content: [{ type: 'text' as const, text: JSON.stringify(payload, null, 2) }]
+                  };
+                } catch (fsErr) {
+                  fileWriteError = (fsErr as Error)?.message || String(fsErr);
+                }
+              }
 
-      // Apply level filter client-side before saving
-      let dataToSave: Record<string, unknown> = result;
-      if (level && level !== 'all') {
-        dataToSave = { ...result };
-        if (level === 'error') {
-          delete dataToSave.warnings;
-          delete dataToSave.userscriptLogs;
-        } else if (level === 'warn') {
-          delete dataToSave.errors;
-          delete dataToSave.userscriptLogs;
-        } else if (level === 'info' || level === 'debug') {
-          delete dataToSave.errors;
-          delete dataToSave.warnings;
-        }
-      }
+              const pruned = pruneToBudget(result, inlineBudgetBytes());
+              const payload = {
+                delivery: 'inline' as const,
+                // On the fallback path the DECISION was file; the disk said
+                // no. Reporting the decision's source here would read as
+                // "inline is the default", which is false and exactly the
+                // kind of claim an agent would repeat to the user.
+                deliverySource: fileWriteError ? ('file-write-fallback' as const) : delivery.source,
+                wroteFile: false,
+                ...(fileWriteError ? { fileWriteError } : {}),
+                sizeKB: asKB(pruned.bytes),
+                truncated: pruned.omissions.length > 0,
+                omitted: pruned.omissions,
+                ...digest,
+                page: pruned.value,
+                hint: (fileWriteError
+                  ? `Writing to the workspace failed (${fileWriteError}), so the snapshot is returned inline instead of being discarded. Fix the workspace path (CUSTOMAISE_WORKSPACE for an IDE server, the directory you ran from for the CLI) or its permissions to get file delivery back. `
+                  : '') + inlineHint('get_page_context', pruned.omissions, pruned.withinBudget),
+              };
+              return {
+                structuredContent: payload,
+                content: [{ type: 'text' as const, text: JSON.stringify(payload, null, 2) }]
+              };
+            });
 
-      // Write full logs to workspace file (overwrite each time)
-      const contextDir = join(getWorkspaceDir(), '.customaise');
-      mkdirSync(contextDir, { recursive: true });
-      const filePath = join(contextDir, 'console-context.json');
-      const fullJson = JSON.stringify(dataToSave, null, 2);
-      writeFileSync(filePath, fullJson, 'utf-8');
+  server.registerTool('get_console_context', { description: 'Get console logs from the browser, including errors, warnings, and userscript GM_log output. Use after reload_tab to check for script runtime errors. WRITES A FILE by default: the full log data goes to .customaise/console-context.json in your workspace and this call returns counts plus the path. Read the file with view_file or grep_search. If you have no filesystem tool, pass output: "inline" to get the whole log in the response and write nothing to disk.', inputSchema: z.object({
+              tabId: z.number().optional().describe('Tab ID to get logs from. Defaults to the active tab.'),
+              level: z.enum(['all', 'error', 'warn', 'info', 'debug']).optional().describe('Filter by log level. Default: all'),
+              output: z.enum(['auto', 'file', 'inline']).optional().describe(outputParamDescription('.customaise/ in your workspace'))
+            }), annotations: { title: 'Get console context', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true } }, async ({ tabId, level, output }) => {
+              const result = await bridge.dispatchTool('get_console_context', { tabId }) as {
+                errors?: Array<Record<string, unknown>>;
+                warnings?: Array<Record<string, unknown>>;
+                userscriptLogs?: Array<Record<string, unknown>>;
+                summary?: Record<string, unknown>;
+                [key: string]: unknown;
+              };
 
-      // Build lightweight summary for the agent's context window
-      const errorCount = Array.isArray(result.errors) ? result.errors.length : 0;
-      const warnCount = Array.isArray(result.warnings) ? result.warnings.length : 0;
-      const gmLogCount = Array.isArray(result.userscriptLogs) ? result.userscriptLogs.length : 0;
-      const fileSizeKB = (Buffer.byteLength(fullJson, 'utf-8') / 1024).toFixed(1);
+              // Strip fields that are only for the extension's internal chat UI
+              delete result.displayContent;
+              delete result.tokenEstimate;
 
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({
-            filePath,
-            fileSizeKB: `${fileSizeKB} KB`,
-            counts: {
-              errors: errorCount,
-              warnings: warnCount,
-              userscriptLogs: gmLogCount,
-              levelFilter: level || 'all'
-            },
-            hint: 'Full console logs saved to the file above. Use view_file or grep_search to inspect specific errors, warnings, or GM_log output without loading all logs.'
-          }, null, 2)
-        }]
-      };
-    }
-  );
+              // Apply level filter client-side before saving
+              let dataToSave: Record<string, unknown> = result;
+              if (level && level !== 'all') {
+                dataToSave = { ...result };
+                if (level === 'error') {
+                  delete dataToSave.warnings;
+                  delete dataToSave.userscriptLogs;
+                } else if (level === 'warn') {
+                  delete dataToSave.errors;
+                  delete dataToSave.userscriptLogs;
+                } else if (level === 'info' || level === 'debug') {
+                  delete dataToSave.errors;
+                  delete dataToSave.warnings;
+                }
+              }
 
-  server.tool(
-    'list_tabs',
-    'List all open browser tabs with their IDs, URLs, titles, and active status. Use to find a specific tab ID for other tools like reload_tab or take_screenshot.',
-    {},
-    { title: 'List tabs', readOnlyHint: true, openWorldHint: true },
-    async () => {
-      const result = await bridge.dispatchTool('list_tabs', {});
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify(result, null, 2)
-        }]
-      };
-    }
-  );
+              // Counts come off the UNFILTERED result on purpose: they tell the
+              // agent what the tab actually holds, so a `level: 'error'` read
+              // that finds nothing still reveals there were 40 warnings.
+              const counts = {
+                errors: Array.isArray(result.errors) ? result.errors.length : 0,
+                warnings: Array.isArray(result.warnings) ? result.warnings.length : 0,
+                userscriptLogs: Array.isArray(result.userscriptLogs) ? result.userscriptLogs.length : 0,
+                levelFilter: level || 'all'
+              };
 
-  server.tool(
-    'open_tab',
-    'Open a new browser tab with the specified URL. Defaults to opening in the background so the user is not snatched away from the tab they are currently viewing. Returns the new tab ID.',
-    {
-      url: z.string().describe('The URL to open in the new tab'),
-      active: z.boolean().optional().describe('Whether the new tab should become the active tab. Defaults to false (opens in background). Set to true only when the agent genuinely needs the new tab brought to focus.')
-    },
-    { title: 'Open tab', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-    async ({ url, active }) => {
-      const result = await bridge.dispatchTool('open_tab', { url, active });
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify(result, null, 2)
-        }]
-      };
-    }
-  );
+              const delivery = resolveDelivery(output);
 
-  server.tool(
-    'close_tab',
-    'Close a specific browser tab. Defaults to the active tab if no tabId is provided.',
-    {
-      tabId: z.number().optional().describe('The ID of the tab to close')
-    },
-    { title: 'Close tab', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-    async ({ tabId }) => {
-      const result = await bridge.dispatchTool('close_tab', { tabId });
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify(result, null, 2)
-        }]
-      };
-    }
-  );
+              // Same write-failure fallback as get_page_context: the
+              // dispatch already ran and the unit is spent, so an
+              // unwritable workspace degrades to inline rather than
+              // discarding the logs.
+              let fileWriteError: string | undefined;
+              if (delivery.mode === 'file') {
+                try {
+                  // Write full logs to workspace file (overwrite each time)
+                  const contextDir = join(getWorkspaceDir(), '.customaise');
+                  mkdirSync(contextDir, { recursive: true });
+                  const filePath = join(contextDir, 'console-context.json');
+                  const fullJson = JSON.stringify(dataToSave, null, 2);
+                  writeFileSync(filePath, fullJson, 'utf-8');
 
-  server.tool(
-    'focus_tab',
-    'Bring a specific browser tab to the front and make it active.',
-    {
-      tabId: z.number().describe('The ID of the tab to focus')
-    },
-    { title: 'Focus tab', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    async ({ tabId }) => {
-      const result = await bridge.dispatchTool('focus_tab', { tabId });
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify(result, null, 2)
-        }]
-      };
-    }
-  );
+                  const payload = {
+                    delivery: 'file' as const,
+                    deliverySource: delivery.source,
+                    filePath,
+                    fileSizeKB: asKB(Buffer.byteLength(fullJson, 'utf-8')),
+                    counts,
+                    hint: fileModeHint(
+                      'get_console_context',
+                      'Full console logs',
+                      'Use view_file or grep_search to inspect specific errors, warnings, or GM_log output without loading all logs.',
+                    ),
+                  };
+                  return {
+                    structuredContent: payload,
+                    content: [{ type: 'text' as const, text: JSON.stringify(payload, null, 2) }]
+                  };
+                } catch (fsErr) {
+                  fileWriteError = (fsErr as Error)?.message || String(fsErr);
+                }
+              }
 
-  server.tool(
-    'reload_tab',
-    'Reload a browser tab to re-inject updated userscripts. Use after export_script to see the effect of your changes. Waits for the page to fully load before returning. If the tab has AgentScript (WebMCP) tools registered, automatically waits for them to re-register before returning.',
-    {
-      tabId: z.number().optional().describe('Tab ID to reload. Defaults to the active tab.')
-    },
-    { title: 'Reload tab', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    async ({ tabId }) => {
-      // The bridge handler auto-detects WebMCP tabs and waits event-driven.
-      // No client-side polling needed — plain userscript tabs return immediately,
-      // AgentScript tabs auto-wait for tool re-registration.
-      const [result, gate] = await Promise.all([
-        bridge.dispatchTool('reload_tab', { tabId }),
-        checkUserScriptsGate()
-      ]);
+              const pruned = pruneToBudget(dataToSave, inlineBudgetBytes());
+              const payload = {
+                delivery: 'inline' as const,
+                // On the fallback path the DECISION was file; the disk said
+                // no. Reporting the decision's source here would read as
+                // "inline is the default", which is false and exactly the
+                // kind of claim an agent would repeat to the user.
+                deliverySource: fileWriteError ? ('file-write-fallback' as const) : delivery.source,
+                wroteFile: false,
+                ...(fileWriteError ? { fileWriteError } : {}),
+                sizeKB: asKB(pruned.bytes),
+                truncated: pruned.omissions.length > 0,
+                omitted: pruned.omissions,
+                counts,
+                console: pruned.value,
+                // `level` is the narrowing this tool already has, so it is
+                // worth naming when a log flood had to be shortened.
+                hint: (fileWriteError
+                  ? `Writing to the workspace failed (${fileWriteError}), so the logs are returned inline instead of being discarded. Fix the workspace path (CUSTOMAISE_WORKSPACE for an IDE server, the directory you ran from for the CLI) or its permissions to get file delivery back. `
+                  : '') + inlineHint('get_console_context', pruned.omissions, pruned.withinBudget)
+                  + (pruned.omissions.length > 0 && counts.levelFilter === 'all'
+                    ? ' Re-reading with level: "error" is usually the cheapest narrowing here.'
+                    : ''),
+              };
+              return {
+                structuredContent: payload,
+                content: [{ type: 'text' as const, text: JSON.stringify(payload, null, 2) }]
+              };
+            });
 
-      return {
-        content: [{
-          type: 'text' as const,
-          text: gate.warning + JSON.stringify(result, null, 2)
-        }]
-      };
-    }
-  );
+  server.registerTool('list_tabs', { description: 'List all open browser tabs with their IDs, URLs, titles, and active status. Use to find a specific tab ID for other tools like reload_tab or take_screenshot.', inputSchema: z.object({}), annotations: { title: 'List tabs', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true } }, async () => {
+              const result = await bridge.dispatchTool('list_tabs', {});
+              return {
+                structuredContent: asStructuredContent(result),
+                content: [{
+                  type: 'text' as const,
+                  text: JSON.stringify(result, null, 2)
+                }]
+              };
+            });
 
-  server.tool(
-    'take_screenshot',
-    'Capture a screenshot of a browser tab without stealing focus from the user. Defaults to the visible viewport. Set fullPage: true to capture the entire scrollable page as one tall image. The screenshot is saved as a PNG file. For background tabs and full-page captures, Chrome briefly displays its standard yellow developer-tools notice at the top of the target tab during capture; it clears automatically when capture completes (typically under one second).',
-    {
-      tabId: z.number().optional().describe('Tab ID to screenshot. Defaults to the active tab.'),
-      filePath: z.string().optional().describe('Local file path to save the screenshot. Auto-generates a temp path if omitted.'),
-      fullPage: z.boolean().optional().describe('If true, capture the entire scrollable page (single tall PNG). If false or omitted, capture the visible viewport only.')
-    },
-    { title: 'Take screenshot', readOnlyHint: true, openWorldHint: true },
-    async ({ tabId, filePath, fullPage }) => {
-      const result = await bridge.dispatchTool('take_screenshot', { tabId, fullPage }) as {
-        dataUrl: string;
-        width?: number;
-        height?: number;
-        captureMode?: string;
-        truncated?: boolean;
-      };
+  server.registerTool('open_tab', { description: 'Open a new browser tab with the specified URL. Defaults to opening in the background so the user is not snatched away from the tab they are currently viewing. Returns the new tab ID.', inputSchema: z.object({
+              url: z.string().describe('The URL to open in the new tab'),
+              active: z.boolean().optional().describe('Whether the new tab should become the active tab. Defaults to false (opens in background). Set to true only when the agent genuinely needs the new tab brought to focus.')
+            }), annotations: { title: 'Open tab', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true } }, async ({ url, active }) => {
+              const result = await bridge.dispatchTool('open_tab', { url, active });
+              return {
+                structuredContent: asStructuredContent(result),
+                content: [{
+                  type: 'text' as const,
+                  text: JSON.stringify(result, null, 2)
+                }]
+              };
+            });
 
-      // Write base64 PNG data to file
-      const savePath = filePath || join(tmpdir(), `customaise-screenshot-${Date.now()}.png`);
-      const base64Data = result.dataUrl.replace(/^data:image\/png;base64,/, '');
-      mkdirSync(dirname(savePath), { recursive: true });
-      writeFileSync(savePath, Buffer.from(base64Data, 'base64'));
+  server.registerTool('close_tab', { description: 'Close a specific browser tab. Defaults to the active tab if no tabId is provided.', inputSchema: z.object({
+              tabId: z.number().optional().describe('The ID of the tab to close')
+            }), annotations: { title: 'Close tab', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false } }, async ({ tabId }) => {
+              const result = await bridge.dispatchTool('close_tab', { tabId });
+              return {
+                structuredContent: asStructuredContent(result),
+                content: [{
+                  type: 'text' as const,
+                  text: JSON.stringify(result, null, 2)
+                }]
+              };
+            });
 
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({
-            success: true,
-            filePath: savePath,
-            width: result.width,
-            height: result.height,
-            captureMode: result.captureMode,
-            truncated: result.truncated
-          }, null, 2)
-        }]
-      };
-    }
-  );
+  server.registerTool('focus_tab', { description: 'Bring a specific browser tab to the front and make it active.', inputSchema: z.object({
+              tabId: z.number().describe('The ID of the tab to focus')
+            }), annotations: { title: 'Focus tab', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false } }, async ({ tabId }) => {
+              const result = await bridge.dispatchTool('focus_tab', { tabId });
+              return {
+                structuredContent: asStructuredContent(result),
+                content: [{
+                  type: 'text' as const,
+                  text: JSON.stringify(result, null, 2)
+                }]
+              };
+            });
 
-  server.tool(
-    'toggle_ui',
-    'Show or hide the Customaise UI overlay on the active tab. Use this to make the Customaise interface visible or dismiss it — AI agents cannot click the extension icon directly. Optionally specify which panel to open.',
-    {
-      tabId: z.number().optional().describe('Tab ID to toggle UI on. Defaults to the active tab.'),
-      panel: z.string().optional().describe('Panel to open: "scripts", "chat", "settings"')
-    },
-    { title: 'Toggle UI', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    async ({ tabId, panel }) => {
-      const result = await bridge.dispatchTool('show_ui', { tabId, panel });
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify(result, null, 2)
-        }]
-      };
-    }
-  );
+  server.registerTool('reload_tab', { description: 'Reload a browser tab to re-inject updated userscripts. Use after export_script to see the effect of your changes. Waits for the page to fully load before returning. If the tab has AgentScript (WebMCP) tools registered, automatically waits for them to re-register before returning.', inputSchema: z.object({
+              tabId: z.number().optional().describe('Tab ID to reload. Defaults to the active tab.')
+            }), annotations: { title: 'Reload tab', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true } }, async ({ tabId }) => {
+              // The bridge handler auto-detects WebMCP tabs and waits event-driven.
+              // No client-side polling needed — plain userscript tabs return immediately,
+              // AgentScript tabs auto-wait for tool re-registration.
+              const result = await bridge.dispatchTool('reload_tab', { tabId });
+                const gate = checkUserScriptsGate();
+
+              return {
+                // Two readers, two halves. The model reads `content`, where the
+                // master-gate banner belongs because it is advice a human
+                // needs relayed. A CLI parses `structuredContent`, which must
+                // stay clean JSON: prepending the banner to the text made
+                // `JSON.parse` fail, so the CLI emitted the whole ASCII
+                // banner as its data. That fires whenever the "Allow user
+                // scripts" toggle is off, i.e. after every Chrome restart.
+                structuredContent: withGate(result, gate),
+                content: [{
+                  type: 'text' as const,
+                  text: gate.warning + JSON.stringify(result, null, 2)
+                }]
+              };
+            });
+
+  server.registerTool('take_screenshot', { description: 'Capture a screenshot of a browser tab without stealing focus from the user. Defaults to the visible viewport. Set fullPage: true to capture the entire scrollable page as one tall image. WRITES A FILE by default: the PNG is saved to filePath, or to an auto-generated path in the system temp directory when filePath is omitted, and this call returns that path rather than the image. If you have no filesystem tool, pass output: "inline" and the image is attached to this response instead, with nothing written to disk. For background tabs and full-page captures, Chrome briefly displays its standard yellow developer-tools notice at the top of the target tab during capture; it clears automatically when capture completes (typically under one second).', inputSchema: z.object({
+              tabId: z.number().optional().describe('Tab ID to screenshot. Defaults to the active tab.'),
+              filePath: z.string().optional().describe('Local file path to save the screenshot. Auto-generates a temp path if omitted. Ignored when output is "inline".'),
+              fullPage: z.boolean().optional().describe('If true, capture the entire scrollable page (single tall PNG). If false or omitted, capture the visible viewport only.'),
+              output: z.enum(['auto', 'file', 'inline']).optional().describe(outputParamDescription('filePath, or the system temp directory when filePath is omitted'))
+            }), annotations: { title: 'Take screenshot', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true } }, async ({ tabId, filePath, fullPage, output }) => {
+              const result = await bridge.dispatchTool('take_screenshot', { tabId, fullPage }) as {
+                dataUrl: string;
+                width?: number;
+                height?: number;
+                captureMode?: string;
+                truncated?: boolean;
+              };
+
+              // A capture with no pixels is a failure, not a screenshot. The
+              // pre-refactor code threw a TypeError here by accident
+              // (`undefined.replace`) and the envelope turned that into a
+              // proper isError; the lenient parser removed the accident, so
+              // the check has to be deliberate — otherwise this writes a
+              // 0-byte PNG and reports success: true on a bridge fault.
+              if (typeof result.dataUrl !== 'string' || result.dataUrl === '') {
+                throw new Error('take_screenshot: the extension returned no image data. The tab may have closed mid-capture, or the page blocks capture (chrome:// and Web Store pages do); retry, or try another tab.');
+              }
+              const { mimeType, base64Data } = ((): { mimeType: string; base64Data: string } => {
+                const parsed = parseDataUrl(result.dataUrl);
+                return { mimeType: parsed.mimeType, base64Data: parsed.base64 };
+              })();
+              const capture = {
+                width: result.width,
+                height: result.height,
+                captureMode: result.captureMode,
+                truncated: result.truncated,
+              };
+
+              const delivery = resolveDelivery(output);
+              const base64Bytes = Buffer.byteLength(base64Data, 'utf-8');
+              const imageBudget = inlineImageBudgetBytes();
+
+              // Inline attaches the image itself. This is the ONE place the
+              // no-media-in-tool-results rule does not apply: everywhere else
+              // base64 rides along beside the answer as decoration, and here
+              // it IS the answer. A caller with no filesystem tool cannot open
+              // a path, so returning one is returning nothing.
+              if (delivery.mode === 'inline' && base64Bytes <= imageBudget) {
+                const payload = {
+                  success: true,
+                  delivery: 'inline' as const,
+                  deliverySource: delivery.source,
+                  wroteFile: false,
+                  mimeType,
+                  imageSizeKB: asKB(base64Bytes),
+                  ...capture,
+                  hint: 'The image is attached to this response. Nothing was written to disk.',
+                };
+                return {
+                  // Metadata only. The base64 stays out of structuredContent
+                  // because the CLI parses that field and would print the
+                  // whole capture to a terminal.
+                  structuredContent: payload,
+                  content: [
+                    { type: 'image' as const, data: base64Data, mimeType },
+                    { type: 'text' as const, text: JSON.stringify(payload, null, 2) },
+                  ],
+                };
+              }
+
+              // Write base64 image data to file
+              const savePath = filePath || join(tmpdir(), `customaise-screenshot-${Date.now()}.png`);
+              mkdirSync(dirname(savePath), { recursive: true });
+              writeFileSync(savePath, Buffer.from(base64Data, 'base64'));
+
+              // An oversized capture cannot be shortened the way a DOM
+              // snapshot can: half an image is not an image. So it degrades to
+              // a file plus the one retry that reliably fits, rather than
+              // pushing several megabytes of base64 at a context window.
+              const overBudget = delivery.mode === 'inline';
+              const payload = {
+                success: true,
+                delivery: 'file' as const,
+                deliverySource: delivery.source,
+                filePath: savePath,
+                imageSizeKB: asKB(base64Bytes),
+                ...capture,
+                ...(overBudget ? { inlineDeclined: `capture is ${asKB(base64Bytes)}, over the ${asKB(imageBudget)} inline ceiling` } : {}),
+                hint: overBudget
+                  ? `Too large to attach inline, so it was saved to the file above instead. `
+                    + `If you cannot read local files, call take_screenshot again with fullPage: false for a viewport capture, which is usually small enough. `
+                    + `Raise CUSTOMAISE_MCP_INLINE_IMAGE_MAX_KB if you need this capture inline.`
+                  : fileModeHint(
+                      'take_screenshot',
+                      'Screenshot',
+                      'Open it with your image or file tool.',
+                    ),
+              };
+              return {
+                structuredContent: payload,
+                content: [{ type: 'text' as const, text: JSON.stringify(payload, null, 2) }]
+              };
+            });
+
+  server.registerTool('toggle_ui', { description: 'Show or hide the Customaise UI overlay on the active tab. Use this to make the Customaise interface visible or dismiss it — AI agents cannot click the extension icon directly. Optionally specify which panel to open.', inputSchema: z.object({
+              tabId: z.number().optional().describe('Tab ID to toggle UI on. Defaults to the active tab.'),
+              panel: z.string().optional().describe('Panel to open: "scripts", "chat", "settings"')
+            }), annotations: { title: 'Toggle UI', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false } }, async ({ tabId, panel }) => {
+              const result = await bridge.dispatchTool('show_ui', { tabId, panel });
+              return {
+                structuredContent: asStructuredContent(result),
+                content: [{
+                  type: 'text' as const,
+                  text: JSON.stringify(result, null, 2)
+                }]
+              };
+            });
 
 
-  server.tool(
-    'list_webmcp_tools',
-    'List all WebMCP tools currently registered by AgentScripts for a specific browser tab. Use this to verify that an exported AgentScript is correctly registering its tools on the target page.',
-    {
-      tabId: z.number().optional().describe('Tab ID to query. Defaults to the active tab.')
-    },
-    { title: 'List WebMCP tools', readOnlyHint: true, openWorldHint: true },
-    async ({ tabId }) => {
-      const [result, gate] = await Promise.all([
-        bridge.dispatchTool('list_webmcp_tools', { tabId }),
-        checkUserScriptsGate()
-      ]);
-      return {
-        content: [{
-          type: 'text' as const,
-          text: gate.warning + JSON.stringify(result, null, 2)
-        }]
-      };
-    }
-  );
+  server.registerTool('list_webmcp_tools', { description: 'List all WebMCP tools currently registered by AgentScripts for a specific browser tab. Use this to verify that an exported AgentScript is correctly registering its tools on the target page. Each entry carries a `permission` field (allow / prompt / deny) telling you what will happen BEFORE you call it: `prompt` blocks on an in-browser consent modal for up to 5 minutes, `deny` fails immediately. Read it and tell the user which calls will need their approval, rather than discovering it mid-run.', inputSchema: z.object({
+              tabId: z.number().optional().describe('Tab ID to query. Defaults to the active tab.')
+            }), annotations: { title: 'List WebMCP tools', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true } }, async ({ tabId }) => {
+              const result = await bridge.dispatchTool('list_webmcp_tools', { tabId });
+                const gate = checkUserScriptsGate();
+              return {
+                // Two readers, two halves. The model reads `content`, where the
+                // master-gate banner belongs because it is advice a human
+                // needs relayed. A CLI parses `structuredContent`, which must
+                // stay clean JSON: prepending the banner to the text made
+                // `JSON.parse` fail, so the CLI emitted the whole ASCII
+                // banner as its data. That fires whenever the "Allow user
+                // scripts" toggle is off, i.e. after every Chrome restart.
+                structuredContent: withGate(result, gate),
+                content: [{
+                  type: 'text' as const,
+                  text: gate.warning + JSON.stringify(result, null, 2)
+                }]
+              };
+            });
 
-  server.tool(
-    'call_webmcp_tool',
-    'Execute a registered WebMCP tool directly on the target browser tab. If the tool is interactive (trust level), the user will be natively prompted by CustomAIse to approve the execution before it returns.',
-    {
-      tabId: z.number().optional().describe('Tab ID to execute on. Defaults to active tab.'),
-      toolName: z.string().describe('The EXACT name of the WebMCP tool to invoke'),
-      toolArgs: z.record(z.any()).optional().describe('JSON object of arguments for the tool')
-    },
-    { title: 'Call WebMCP tool', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-    async ({ tabId, toolName, toolArgs }) => {
-      // Gate check FIRST. call_webmcp_tool against a snoozing extension
-      // will error with "tool not registered" — surfacing the gate here
-      // tells the agent why the error is happening BEFORE the dispatch
-      // returns its no-such-tool failure.
-      const gate = await checkUserScriptsGate();
-      const result = await bridge.dispatchTool('call_webmcp_tool', { tabId, toolName, toolArgs });
-      return {
-        content: [{
-          type: 'text' as const,
-          text: gate.warning + JSON.stringify(result, null, 2)
-        }]
-      };
-    }
-  );
+  server.registerTool('get_bridge_status', { description: `Report the bridge's own state: whether the extension is attached, the plan tier, whether you are signed in, whether remote approvals are enabled, and how much of the MCP cap is left today and this week. Costs NO cap units, because it reads state the server already holds rather than calling the browser. Check this before a long run so you find out you have three calls left now rather than mid-task.`, inputSchema: z.object({}), annotations: { title: 'Bridge status', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } }, async () => {
+              // Deliberately NOT `dispatchTool`: this reads the CapSession the
+              // server already holds from init_session and never touches the
+              // extension, so a diagnostic does not spend the headroom it
+              // exists to report on. `doctor` used to call `list_tabs`, which
+              // meant checking why MCP was failing cost a unit of the budget
+              // that might be why it was failing.
+              const snapshot = bridge.getSessionSnapshot();
+              return {
+                structuredContent: asStructuredContent(snapshot),
+                content: [{ type: 'text' as const, text: JSON.stringify(snapshot, null, 2) }]
+              };
+            });
+
+
+  server.registerTool('call_webmcp_tool', { description: 'Execute a registered WebMCP tool directly on the target browser tab. If the tool is interactive (trust level), the user will be natively prompted by CustomAIse to approve the execution before it returns.', inputSchema: z.object({
+              tabId: z.number().optional().describe('Tab ID to execute on. Defaults to active tab.'),
+              toolName: z.string().describe('The EXACT name of the WebMCP tool to invoke'),
+              toolArgs: z.record(z.string(), z.any()).optional().describe('JSON object of arguments for the tool')
+            }), annotations: { title: 'Call WebMCP tool', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true } }, async ({ tabId, toolName, toolArgs }) => {
+              // Gate check FIRST. call_webmcp_tool against a snoozing extension
+              // will error with "tool not registered" — surfacing the gate here
+              // tells the agent why the error is happening BEFORE the dispatch
+              // returns its no-such-tool failure.
+              const gate = checkUserScriptsGate();
+              const result = await bridge.dispatchTool('call_webmcp_tool', { tabId, toolName, toolArgs });
+              return {
+                // Two readers, two halves. The model reads `content`, where the
+                // master-gate banner belongs because it is advice a human
+                // needs relayed. A CLI parses `structuredContent`, which must
+                // stay clean JSON: prepending the banner to the text made
+                // `JSON.parse` fail, so the CLI emitted the whole ASCII
+                // banner as its data. That fires whenever the "Allow user
+                // scripts" toggle is off, i.e. after every Chrome restart.
+                structuredContent: withGate(result, gate),
+                content: [{
+                  type: 'text' as const,
+                  text: gate.warning + JSON.stringify(result, null, 2)
+                }]
+              };
+            });
 
   // ─── File Sync ──────────────────────────────────────────────────────
 
-  server.tool(
-    'sync_scripts',
-    'Bulk export all your own scripts from Customaise to a local directory as individual .user.js or .agent.js files. Creates a .customaise-manifest.json mapping filenames to script IDs. Shared/subscribed scripts are excluded (they are read-only). Use this to set up a local workspace for editing scripts with your IDE.',
-    {
-      directory: z.string().describe('Local directory to export scripts to (e.g., ./customaise-scripts/)')
-    },
-    { title: 'Sync scripts to workspace', readOnlyHint: true, openWorldHint: false },
-    async ({ directory }) => {
-      // Get all scripts with code
-      const scripts = await bridge.dispatchTool('list_scripts_with_code', {}) as Array<{
-        id: string;
-        name: string;
-        code: string;
-        enabled: boolean;
-      }>;
+  server.registerTool('sync_scripts', { description: 'Bulk export all your own scripts from Customaise to a local directory as individual .user.js or .agent.js files. WRITES MANY FILES and OVERWRITES existing ones: a local file whose name matches a script is replaced by the copy held in Customaise, so unexported local edits in that directory are lost. Creates a .customaise-manifest.json mapping filenames to script IDs. Shared/subscribed scripts are excluded (they are read-only). Use this to set up a local workspace for editing scripts with your IDE.', inputSchema: z.object({
+              directory: z.string().describe('Local directory to export scripts to (e.g., ./customaise-scripts/)')
+            }), annotations: { title: 'Sync scripts to workspace', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false } }, async ({ directory }) => {
+              // Get all scripts with code
+              const scripts = await bridge.dispatchTool('list_scripts_with_code', {}) as Array<{
+                id: string;
+                name: string;
+                code: string;
+                enabled: boolean;
+              }>;
 
-      mkdirSync(directory, { recursive: true });
+              mkdirSync(directory, { recursive: true });
 
-      const manifest: Record<string, string> = {};
-      let filesWritten = 0;
+              const manifest: Record<string, string> = {};
+              let filesWritten = 0;
 
-      const usedNames = new Set<string>();
+              const usedNames = new Set<string>();
 
-      for (const script of scripts) {
-        // Determine file extension based on content
-        const isAgentScript = typeof script.code === 'string' && script.code.includes('// ==AgentScript==');
-        const fileExt = isAgentScript ? '.agent.js' : '.user.js';
+              for (const script of scripts) {
+                // Determine file extension based on content
+                const isAgentScript = typeof script.code === 'string' && script.code.includes('// ==AgentScript==');
+                const fileExt = isAgentScript ? '.agent.js' : '.user.js';
 
-        // Generate a safe filename from the script name
-        let safeName = (script.name || 'untitled')
-          .toLowerCase()
-          .replace(/[^a-z0-9_-]/g, '-')
-          .replace(/-+/g, '-')
-          .replace(/^-|-$/g, '');
+                // Generate a safe filename from the script name
+                let safeName = (script.name || 'untitled')
+                  .toLowerCase()
+                  .replace(/[^a-z0-9_-]/g, '-')
+                  .replace(/-+/g, '-')
+                  .replace(/^-|-$/g, '');
 
-        // Handle filename collisions — append short ID suffix if name already used
-        let fileName = `${safeName}${fileExt}`;
-        if (usedNames.has(fileName)) {
-          const idSuffix = script.id.slice(-6);
-          fileName = `${safeName}-${idSuffix}${fileExt}`;
-        }
-        usedNames.add(fileName);
-        const filePath = `${directory}/${fileName}`;
+                // Handle filename collisions — append short ID suffix if name already used
+                let fileName = `${safeName}${fileExt}`;
+                if (usedNames.has(fileName)) {
+                  const idSuffix = script.id.slice(-6);
+                  fileName = `${safeName}-${idSuffix}${fileExt}`;
+                }
+                usedNames.add(fileName);
+                const filePath = `${directory}/${fileName}`;
 
-        // Mute each file to prevent the watcher from re-exporting
-        if (fileWatcher) fileWatcher.muteFile(fileName);
-        writeFileSync(filePath, script.code || '', 'utf-8');
-        manifest[fileName] = script.id;
-        filesWritten++;
-      }
+                // Mute each file to prevent the watcher from re-exporting
+                if (fileWatcher) fileWatcher.muteFile(fileName);
+                writeFileSync(filePath, script.code || '', 'utf-8');
+                manifest[fileName] = script.id;
+                filesWritten++;
+              }
 
-      // Write manifest for ID mapping
-      const manifestPath = `${directory}/.customaise-manifest.json`;
-      writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf-8');
+              // Write manifest for ID mapping
+              const manifestPath = `${directory}/.customaise-manifest.json`;
+              writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf-8');
 
-      // Start file watcher on the synced directory
-      if (fileWatcher) {
-        fileWatcher.start(directory);
-      }
+              // Start file watcher on the synced directory. In daemon mode
+              // this is a no-op unless the daemon was started with --watch.
+              if (fileWatcher) {
+                fileWatcher.start(directory);
+              }
 
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({
-            success: true,
-            directory,
-            filesWritten,
-            manifestPath,
-            scripts: Object.entries(manifest).map(([file, id]) => ({ file, id }))
-          }, null, 2)
-        }]
-      };
-    }
-  );
+              // Say whether edits will actually flow back. Without this an
+              // agent syncs, edits a file, and assumes the change landed;
+              // it would find out only when the next tool call ran against
+              // the old script.
+              const autoExport = fileWatcher ? fileWatcher.isEnabled : false;
+              const payload = {
+                success: true,
+                directory,
+                filesWritten,
+                manifestPath,
+                autoExport,
+                autoExportNote: autoExport
+                  ? 'Saving a .user.js or .agent.js file here re-exports it automatically.'
+                  : 'Auto-export is off: call export_script after editing, or start the daemon with --watch.',
+                scripts: Object.entries(manifest).map(([file, id]) => ({ file, id }))
+              };
+              return {
+                structuredContent: payload,
+                content: [{
+                  type: 'text' as const,
+                  text: JSON.stringify(payload, null, 2)
+                }]
+              };
+            });
 
 
   // ─── DOM Selection Bridge ──────────────────────────────────────────
 
-  server.tool(
-    'get_selected_elements',
-    'Get DOM elements that the user has visually selected in the browser for a specific script. Returns each selection\'s bulletproof selectors, element context, and user comments. Use CM_findElement with the domId for precise targeting in scripts. When MCP is connected, .dom.md context files and screenshots are automatically pushed to the workspace (.customaise/dom-context/<script-name>/) in real-time as the user selects elements. Use this tool to retrieve selections if the auto-pushed files are missing or to get the raw JSON data.',
-    {
-      scriptId: z.string().optional().describe('Script ID to get selections for. Omit to get all scripts\' selections.'),
-      writeFiles: z.boolean().optional().describe('If true, writes .dom.md context files to the workspace directory. Default: false.'),
-      directory: z.string().optional().describe('Workspace directory for .dom.md files. Required if writeFiles is true.')
-    },
-    { title: 'Get selected elements', readOnlyHint: true, openWorldHint: false },
-    async ({ scriptId, writeFiles, directory }) => {
-      const result = await bridge.dispatchTool('get_selected_elements', { scriptId }) as any;
+  server.registerTool('get_selected_elements', { description: 'Get DOM elements that the user has visually selected in the browser for a specific script. Returns each selection\'s bulletproof selectors, element context, and user comments. Returns the selections in this response, so it needs no filesystem access. WRITES FILES only when you pass writeFiles: true, which saves .dom.md context files under the directory you name. Use CM_findElement with the domId for precise targeting in scripts. When MCP is connected, .dom.md context files and screenshots are automatically pushed to the workspace (.customaise/dom-context/<script-name>/) in real-time as the user selects elements. Use this tool to retrieve selections if the auto-pushed files are missing or to get the raw JSON data.', inputSchema: z.object({
+              scriptId: z.string().optional().describe('Script ID to get selections for. Omit to get all scripts\' selections.'),
+              writeFiles: z.boolean().optional().describe('If true, writes .dom.md context files to the workspace directory. Default: false.'),
+              directory: z.string().optional().describe('Workspace directory for .dom.md files. Required if writeFiles is true.')
+            }), annotations: { title: 'Get selected elements', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false } }, async ({ scriptId, writeFiles, directory }) => {
+              const result = await bridge.dispatchTool('get_selected_elements', { scriptId }) as any;
 
-      // Optionally write .dom.md files to workspace
-      if (writeFiles && directory) {
-        const selections = scriptId
-          ? [{ scriptId: result.scriptId, scriptName: result.scriptName, selections: result.selections }]
-          : (result.scripts || []);
+              // Optionally write .dom.md files to workspace
+              if (writeFiles && directory) {
+                const selections = scriptId
+                  ? [{ scriptId: result.scriptId, scriptName: result.scriptName, selections: result.selections }]
+                  : (result.scripts || []);
 
-        for (const script of selections) {
-          if (!script.selections || script.selections.length === 0) continue;
+                for (const script of selections) {
+                  if (!script.selections || script.selections.length === 0) continue;
 
-          const safeName = (script.scriptName || 'unknown')
-            .toLowerCase()
-            .replace(/[^a-z0-9_-]/g, '-')
-            .replace(/-+/g, '-')
-            .replace(/^-|-$/g, '') || 'script';
-          // Normalize: strip trailing .customaise/dom-context if caller already included it
-          let baseDir = directory;
-          if (baseDir.replace(/\/+$/, '').endsWith('.customaise/dom-context')) {
-            baseDir = baseDir.replace(/\/?\.customaise\/dom-context\/?$/, '');
-          }
-          const scriptDir = join(baseDir, '.customaise', 'dom-context', safeName);
-          mkdirSync(scriptDir, { recursive: true });
+                  const safeName = (script.scriptName || 'unknown')
+                    .toLowerCase()
+                    .replace(/[^a-z0-9_-]/g, '-')
+                    .replace(/-+/g, '-')
+                    .replace(/^-|-$/g, '') || 'script';
+                  // Normalize: strip trailing .customaise/dom-context if caller already included it
+                  let baseDir = directory;
+                  if (baseDir.replace(/\/+$/, '').endsWith('.customaise/dom-context')) {
+                    baseDir = baseDir.replace(/\/?\.customaise\/dom-context\/?$/, '');
+                  }
+                  const scriptDir = join(baseDir, '.customaise', 'dom-context', safeName);
+                  mkdirSync(scriptDir, { recursive: true });
 
-          const manifest: Record<string, any> = {};
-          const usedNames = new Set<string>();
+                  const manifest: Record<string, any> = {};
+                  const usedNames = new Set<string>();
 
-          for (const sel of script.selections) {
-            // Generate safe filename from display name, with collision prevention
-            let safeElName = (sel.displayName || sel.tagName || 'element')
-              .toLowerCase()
-              .replace(/[^a-z0-9_-]/g, '-')
-              .replace(/-+/g, '-')
-              .replace(/^-|-$/g, '') || 'element';
+                  for (const sel of script.selections) {
+                    // Generate safe filename from display name, with collision prevention
+                    let safeElName = (sel.displayName || sel.tagName || 'element')
+                      .toLowerCase()
+                      .replace(/[^a-z0-9_-]/g, '-')
+                      .replace(/-+/g, '-')
+                      .replace(/^-|-$/g, '') || 'element';
 
-            // Deduplicate filenames: append counter if collision
-            if (usedNames.has(safeElName)) {
-              let counter = 2;
-              while (usedNames.has(`${safeElName}-${counter}`)) counter++;
-              safeElName = `${safeElName}-${counter}`;
-            }
-            usedNames.add(safeElName);
+                    // Deduplicate filenames: append counter if collision
+                    if (usedNames.has(safeElName)) {
+                      let counter = 2;
+                      while (usedNames.has(`${safeElName}-${counter}`)) counter++;
+                      safeElName = `${safeElName}-${counter}`;
+                    }
+                    usedNames.add(safeElName);
 
-            // Helper to safely quote YAML values
-            const yq = (val: string) => `"${(val || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')}"`;
+                    // Helper to safely quote YAML values
+                    const yq = (val: string) => `"${(val || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')}"`;
 
             // Write .dom.md with YAML frontmatter (all values defensively quoted)
             // Helper: render a YAML list of selectors, skipping empty tiers
             const bp = sel.bulletproofSelectors || {} as any;
             const tierLines: string[] = [];
             tierLines.push(`  tier1_stableId: ${bp.tier1_stableId ? yq(bp.tier1_stableId) : 'null'}`);
-            const tierArrays: [string, string[]][] = [
-              ['tier2_dataAttributes', bp.tier2_dataAttributes || []],
-              ['tier3_ariaLabels', bp.tier3_ariaLabels || []],
-              ['tier4_semanticClasses', bp.tier4_semanticClasses || []],
-              ['tier5_structuralPositioning', bp.tier5_structuralPositioning || []],
-              ['tier6_structuralXPath', bp.tier6_structuralXPath || []],
-              ['tier7_structural', bp.tier7_structural || []],
-            ];
-            for (const [name, arr] of tierArrays) {
-              if (arr.length > 0) {
-                tierLines.push(`  ${name}:`);
-                for (const item of arr) tierLines.push(`    - ${yq(item)}`);
-              }
-            }
-            if (bp.textContentHash) tierLines.push(`  textContentHash: ${yq(bp.textContentHash)}`);
-            if (bp.structuralFingerprint) tierLines.push(`  structuralFingerprint: ${yq(bp.structuralFingerprint)}`);
+                    const tierArrays: [string, string[]][] = [
+                      ['tier2_dataAttributes', bp.tier2_dataAttributes || []],
+                      ['tier3_ariaLabels', bp.tier3_ariaLabels || []],
+                      ['tier4_semanticClasses', bp.tier4_semanticClasses || []],
+                      ['tier5_structuralPositioning', bp.tier5_structuralPositioning || []],
+                      ['tier6_structuralXPath', bp.tier6_structuralXPath || []],
+                      ['tier7_structural', bp.tier7_structural || []],
+                    ];
+                    for (const [name, arr] of tierArrays) {
+                      if (arr.length > 0) {
+                        tierLines.push(`  ${name}:`);
+                        for (const item of arr) tierLines.push(`    - ${yq(item)}`);
+                      }
+                    }
+                    if (bp.textContentHash) tierLines.push(`  textContentHash: ${yq(bp.textContentHash)}`);
+                    if (bp.structuralFingerprint) tierLines.push(`  structuralFingerprint: ${yq(bp.structuralFingerprint)}`);
 
-            // Capture screenshot FIRST so we know whether to include the link in dom.md
-            // When captureScreenshots is true, ALWAYS use capture_element_screenshot
-            // which highlights the element, scrolls into view, and takes a fresh capture.
-            // The pre-stored sel.screenshot is just a generic full-tab capture from
-            // selection time — it doesn't show highlights or scroll to off-screen elements.
-            // Use pre-stored screenshot if available (captured at selection time)
-            let hasScreenshot = false;
-            if (sel.screenshot) {
-              try {
-                const imgBuffer = Buffer.from(sel.screenshot, 'base64');
-                writeFileSync(join(scriptDir, `${safeElName}.screenshot.png`), imgBuffer);
-                hasScreenshot = true;
-              } catch {
-                // Non-fatal
-              }
-            }
+                    // Use the screenshot captured at selection time. A fresh
+                    // per-element capture was designed once (highlight, scroll
+                    // into view, recapture) and never wired: the flag it was
+                    // conditioned on does not exist, it would cost a dispatch
+                    // per element, and it moves the user's viewport from inside
+                    // a readOnlyHint tool. If it is ever wanted it deserves its
+                    // own tool and its own annotations, not a side effect of a
+                    // read.
+                    let hasScreenshot = false;
+                    if (sel.screenshot) {
+                      try {
+                        const imgBuffer = Buffer.from(sel.screenshot, 'base64');
+                        writeFileSync(join(scriptDir, `${safeElName}.screenshot.png`), imgBuffer);
+                        hasScreenshot = true;
+                      } catch {
+                        // Non-fatal
+                      }
+                    }
 
-            const domMd = [
-              '---',
-              `domId: ${yq(sel.domId)}`,
-              `displayName: ${yq(sel.displayName || '')}`,
-              `tagName: ${yq(sel.tagName)}`,
-              `cssPath: ${yq(sel.cssPath || '')}`,
-              `textPreview: ${yq((sel.textPreview || '').slice(0, 200))}`,
-              `role: ${yq(sel.semantics?.role || 'unknown')}`,
-              `purpose: ${yq(sel.semantics?.purpose || 'unknown')}`,
-              `interactivity: ${sel.semantics?.interactivity || false}`,
-              `pageUrl: ${yq(sel.pageUrl)}`,
-              `pageTitle: ${yq(sel.pageTitle || '')}`,
-              `selectedAt: ${sel.selectedAt}`,
-              'bulletproofSelectors:',
-              ...tierLines,
-              '---',
-              '',
-              `# ${sel.displayName || sel.tagName}`,
-              '',
-              sel.userComment ? `> ${sel.userComment.replace(/\\n/g, '\n> ')}` : '> _No user comment provided._',
-              '',
-              hasScreenshot ? `![Element screenshot](./${safeElName}.screenshot.png)` : '',
-              '',
-              '## CM_findElement Usage',
-              '```js',
-              `const element = await CM_findElement('${sel.domId}');`,
-              '```',
-              ''
-            ].filter(Boolean).join('\n');
+                    const domMd = [
+                      '---',
+                      `domId: ${yq(sel.domId)}`,
+                      `displayName: ${yq(sel.displayName || '')}`,
+                      `tagName: ${yq(sel.tagName)}`,
+                      `cssPath: ${yq(sel.cssPath || '')}`,
+                      `textPreview: ${yq((sel.textPreview || '').slice(0, 200))}`,
+                      `role: ${yq(sel.semantics?.role || 'unknown')}`,
+                      `purpose: ${yq(sel.semantics?.purpose || 'unknown')}`,
+                      `interactivity: ${sel.semantics?.interactivity || false}`,
+                      `pageUrl: ${yq(sel.pageUrl)}`,
+                      `pageTitle: ${yq(sel.pageTitle || '')}`,
+                      `selectedAt: ${sel.selectedAt}`,
+                      'bulletproofSelectors:',
+                      ...tierLines,
+                      '---',
+                      '',
+                      `# ${sel.displayName || sel.tagName}`,
+                      '',
+                      sel.userComment ? `> ${sel.userComment.replace(/\\n/g, '\n> ')}` : '> _No user comment provided._',
+                      '',
+                      hasScreenshot ? `![Element screenshot](./${safeElName}.screenshot.png)` : '',
+                      '',
+                      '## CM_findElement Usage',
+                      '```js',
+                      `const element = await CM_findElement('${sel.domId}');`,
+                      '```',
+                      ''
+                    ].filter(Boolean).join('\n');
 
-            writeFileSync(join(scriptDir, `${safeElName}.dom.md`), domMd, 'utf-8');
+                    writeFileSync(join(scriptDir, `${safeElName}.dom.md`), domMd, 'utf-8');
 
-            manifest[sel.domId] = {
-              file: `${safeElName}.dom.md`,
-              displayName: sel.displayName,
-              tagName: sel.tagName
-            };
-          }
+                    manifest[sel.domId] = {
+                      file: `${safeElName}.dom.md`,
+                      displayName: sel.displayName,
+                      tagName: sel.tagName
+                    };
+                  }
 
-          // Write manifest
-          writeFileSync(
-            join(scriptDir, '_manifest.json'),
-            JSON.stringify({ scriptId: script.scriptId, scriptName: script.scriptName, elements: manifest }, null, 2),
+                  // Write manifest
+                  writeFileSync(
+                    join(scriptDir, '_manifest.json'),
+                    JSON.stringify({ scriptId: script.scriptId, scriptName: script.scriptName, elements: manifest }, null, 2),
             'utf-8'
           );
         }
       }
 
       return {
+        structuredContent: asStructuredContent(result),
         content: [{
           type: 'text' as const,
           text: JSON.stringify(result, null, 2)
         }]
       };
-    }
-  );
+    });
 
 
   // ─── Agent-Triggered DOM Selection ──────────────────────────────────
@@ -853,6 +1072,24 @@ IMPORTANT: Save files inside your current workspace or project directory (e.g., 
   bridge.onPush((type, data) => {
     if (type !== 'dom_selection_file') return;
 
+    // Where does this land? A push arrives unsolicited, with no request to
+    // read a workspace from, so a process that has not been told where its
+    // caller is standing declines rather than guessing. That is the daemon
+    // before any CLI has spoken to it: guessing would mean scattering
+    // `.dom.md` files and screenshots into whatever directory it was
+    // spawned from, forever, where nobody would look for them.
+    let pushWorkspace: string | undefined;
+    if (resolvePushTarget) {
+      const target = resolvePushTarget();
+      if (target.dir === null) {
+        process.stderr.write(
+          `[customaise-mcp] Selection push declined: ${target.reason}\n`,
+        );
+        return;
+      }
+      pushWorkspace = target.dir;
+    }
+
     try {
       const { scriptId, scriptName, selection, screenshot } = data || {};
       if (!selection || !selection.domId) {
@@ -860,7 +1097,7 @@ IMPORTANT: Save files inside your current workspace or project directory (e.g., 
         return;
       }
 
-      const baseDir = getWorkspaceDir();
+      const baseDir = pushWorkspace ?? getWorkspaceDir();
       const safeName = (scriptName || scriptId || 'unknown')
         .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
       const scriptDir = join(baseDir, '.customaise', 'dom-context', safeName);
@@ -926,7 +1163,7 @@ export function registerPromptsAndResources(server: McpServer, bridge: Bridge): 
 
   // ─── Resources ──────────────────────────────────────────────────────
 
-  server.resource(
+  server.registerResource(
     'scripts-list',
     'customaise://scripts',
     {
@@ -945,7 +1182,7 @@ export function registerPromptsAndResources(server: McpServer, bridge: Bridge): 
     }
   );
 
-  server.resource(
+  server.registerResource(
     'script-source',
     new ResourceTemplate('customaise://scripts/{scriptId}', { list: undefined }),
     {
@@ -965,12 +1202,15 @@ export function registerPromptsAndResources(server: McpServer, bridge: Bridge): 
     }
   );
 
-  server.resource(
+  server.registerResource(
     'conventions',
     'customaise://conventions',
     {
       description: 'Directory pointer for Customaise conventions.',
-      mimeType: 'text/markdown'
+      mimeType: 'text/markdown',
+      // Static handbook: its content changes only on release, so unlike
+      // `customaise://scripts` it is safe to cache.
+      cacheHint: { ttlMs: 60 * 60 * 1000 }
     },
     async (uri) => {
       return {
@@ -983,12 +1223,15 @@ export function registerPromptsAndResources(server: McpServer, bridge: Bridge): 
     }
   );
 
-  server.resource(
+  server.registerResource(
     'userscript-conventions',
     'customaise://userscript-conventions',
     {
       description: 'Complete conventions, workflow, and API guide for building Customaise UserScripts.',
-      mimeType: 'text/markdown'
+      mimeType: 'text/markdown',
+      // Static handbook: its content changes only on release, so unlike
+      // `customaise://scripts` it is safe to cache.
+      cacheHint: { ttlMs: 60 * 60 * 1000 }
     },
     async (uri) => {
       return {
@@ -1001,12 +1244,15 @@ export function registerPromptsAndResources(server: McpServer, bridge: Bridge): 
     }
   );
 
-  server.resource(
+  server.registerResource(
     'agentscript-conventions',
     'customaise://agentscript-conventions',
     {
       description: 'Complete conventions, workflow, and API guide for building Customaise AgentScripts.',
-      mimeType: 'text/markdown'
+      mimeType: 'text/markdown',
+      // Static handbook: its content changes only on release, so unlike
+      // `customaise://scripts` it is safe to cache.
+      cacheHint: { ttlMs: 60 * 60 * 1000 }
     },
     async (uri) => {
       return {
@@ -1384,7 +1630,7 @@ The two communicate via a WebSocket on \`localhost:4050\` (the Customaise MCP se
 
 ## Format Requirements
 1. MUST use the \`// ==AgentScript==\` metadata block (NOT UserScript).
-2. MUST declare each tool via \`// @webmcp <toolName> <permission>\` (permissions: allow, prompt, deny). Undeclared tools are denied by default.
+2. MUST declare each tool via \`// @webmcp <toolName> <permission>\` (permissions: allow, prompt, deny). Undeclared tools are denied by default. **Prefer \`prompt\`**: in a script you wrote as an agent, a self-declared \`allow\` resolves as \`prompt\` anyway, so declaring \`allow\` buys nothing and reads as though it did. The gate keys on who wrote the script, not on what the script asks for: a script installed through the MCP bridge or the CLI cannot grant itself an ungated tool, and \`export_script\` returns a \`WEBMCP_ALLOW_DOWNGRADED\` warning when you try. The user makes it permanent by choosing "Always allow" on the first prompt.
 3. Top-level \`navigator.modelContext.registerTool()\` is **strongly recommended** (NOT enforced — IIFE-wrapped scripts also work). The reason: Customaise's in-browser AI editor performs **symbol-level edits** (function-by-function) only on functions that are addressable at the top level or inside a clearly-named IIFE structure with named functions. Flat anonymous code or deeply-nested anonymous arrows force the editor to fall back to **whole-script rewrite**, which is slower, more error-prone, and loses git-friendly diffs. If symbol-editability matters (it usually does for long-lived scripts), structure your code as named top-level functions referenced by your \`registerTool\` calls.
 
 \`\`\`javascript
@@ -1425,7 +1671,7 @@ navigator.modelContext.registerTool({
 ## Required Directives
 | Directive | Description |
 |-----------|-------------|
-| \`@webmcp\`  | **Mandatory.** Format: \`<toolName> <allow|prompt|deny>\`. Declares explicit permissions for each registered tool. |
+| \`@webmcp\`  | **Mandatory.** Format: \`<toolName> <allow|prompt|deny>\`. Declares explicit permissions for each registered tool. In an agent-written script a self-declared \`allow\` is honoured as \`prompt\`; the user makes it permanent with an override. |
 
 ## Granular Tool Permissions
 - \`allow\` — Autonomous. Executes immediately without user confirmation.
@@ -1438,6 +1684,10 @@ Every \`navigator.modelContext.callTool(...)\` invocation — yours, the IDE MCP
 - \`prompt\` tools may **block for up to 5 minutes** while waiting on the user. Design tools so this is acceptable (no timing-sensitive logic between trigger and execute).
 
 The same gate enforces the same \`@webmcp\` policy across **every call path**, so a tool you mark \`prompt\` will reliably show the consent modal regardless of who invokes it. This is a guarantee you can rely on for security-sensitive operations.
+
+**Effective permission = your declaration AND where the script came from.** The gate only ever moves toward stricter. If YOU wrote a script through Customaise, \`allow\` means allow. If an AGENT wrote it, through this MCP bridge or the \`customaise\` CLI, a self-declared \`allow\` resolves as \`prompt\` instead: an agent that could grant itself the tool it is about to call is not being gated at all. \`deny\` always denies.
+
+**So declare \`prompt\` by default, not \`allow\`.** Nothing is lost by it. The first call shows the user what you built, and if they choose "Always allow" the override is stored and the tool never prompts again. That is the intended way an agent-written tool becomes autonomous: the user grants it once, having seen it, rather than the script asserting it about itself.
 
 ## Manual HITL Requests
 Even if your tool is granted the \`allow\` permission, you can dynamically invoke the Customaise consent modal inside an execute block:

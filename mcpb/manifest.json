@@ -1,0 +1,134 @@
+{
+  "manifest_version": "0.3",
+  "name": "Customaise",
+  "display_name": "Customaise",
+  "version": "0.0.0",
+  "description": "The bridge between Claude Desktop and your Customaise Chrome extension. Claude reads live pages, calls custom WebMCP tools, writes UserScripts and AgentScripts, all in your signed-in browser session.",
+  "long_description": "Customaise is the layer between any site and any AI agent. It runs two kinds of small scripts in your browser. UserScripts reshape the pages you live in: the standard .user.js userscript format, plus an AI editor that writes them from a single sentence. AgentScripts go the other direction: they expose a site as custom WebMCP tools your agent can call. Build them yourself, install them from the community, or have Claude write them for you.\n\nThis bundle is the bridge between Claude Desktop and the Customaise Chrome extension. Once installed, Claude can call the custom WebMCP tools registered on your open tabs (through Customaise's human-in-the-loop consent gate), read live page DOM, take screenshots, capture console output, and write or edit UserScripts and AgentScripts on your behalf. Everything runs in the browser session where you're already signed in: no API keys, no service accounts, no separate OAuth. The same 19 tools work for Cursor, Claude Code, Codex, Windsurf, Antigravity, and Kiro through their own MCP configurations.\n\nYou need the Customaise Chrome extension installed and signed in. The extension is the full product; a Power User plan unlocks unlimited use of this MCP bridge.",
+  "author": {
+    "name": "CNDLE Studio LTD",
+    "url": "https://customaise.com"
+  },
+  "homepage": "https://customaise.com",
+  "documentation": "https://customaise.com/learn",
+  "support": "https://customaise.com/support",
+  "icon": "icon.png",
+  "license": "MIT",
+  "privacy_policies": [
+    "https://customaise.com/privacy"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/getcustomaise/customaise-mcp"
+  },
+  "keywords": [
+    "customaise",
+    "userscripts",
+    "agentscripts",
+    "webmcp",
+    "chrome-extension",
+    "browser-automation"
+  ],
+  "compatibility": {
+    "claude_desktop": ">=0.10.0",
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ],
+    "runtimes": {
+      "node": ">=20.0.0"
+    }
+  },
+  "tools": [
+    {
+      "name": "get_bridge_status",
+      "description": "Report bridge, auth, tier and remaining MCP cap. Costs no cap units."
+    },
+    {
+      "name": "list_scripts",
+      "description": "List all scripts installed in Customaise."
+    },
+    {
+      "name": "import_script",
+      "description": "Import a script from Customaise to a local file for editing."
+    },
+    {
+      "name": "export_script",
+      "description": "Export a script from a local file into Customaise."
+    },
+    {
+      "name": "delete_script",
+      "description": "Permanently delete a script from Customaise."
+    },
+    {
+      "name": "toggle_script",
+      "description": "Enable or disable a userscript."
+    },
+    {
+      "name": "get_page_context",
+      "description": "Get a DOM snapshot of the current page."
+    },
+    {
+      "name": "get_console_context",
+      "description": "Get console logs from the browser."
+    },
+    {
+      "name": "list_tabs",
+      "description": "List all open browser tabs."
+    },
+    {
+      "name": "open_tab",
+      "description": "Open a new browser tab."
+    },
+    {
+      "name": "close_tab",
+      "description": "Close a specific browser tab."
+    },
+    {
+      "name": "focus_tab",
+      "description": "Bring a browser tab to the front."
+    },
+    {
+      "name": "reload_tab",
+      "description": "Reload a browser tab."
+    },
+    {
+      "name": "take_screenshot",
+      "description": "Capture a screenshot of the current visible browser tab."
+    },
+    {
+      "name": "toggle_ui",
+      "description": "Show or hide the Customaise UI overlay on the active tab."
+    },
+    {
+      "name": "list_webmcp_tools",
+      "description": "List all WebMCP tools currently registered by AgentScripts."
+    },
+    {
+      "name": "call_webmcp_tool",
+      "description": "Execute a registered WebMCP tool on the target browser tab."
+    },
+    {
+      "name": "sync_scripts",
+      "description": "Bulk export all your scripts to a local directory."
+    },
+    {
+      "name": "get_selected_elements",
+      "description": "Get DOM elements visually selected by the user."
+    }
+  ],
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/server/index.js"
+      ],
+      "env": {
+        "CUSTOMAISE_MCP_OUTPUT": "inline"
+      }
+    }
+  }
+}
