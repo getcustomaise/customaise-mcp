@@ -1,5 +1,5 @@
 /**
- * FileWatcher — watches a synced scripts directory for .user.js changes
+ * FileWatcher — watches a synced scripts directory for script changes
  * and auto-exports modified files back to Customaise.
  *
  * Activated after sync_scripts creates the manifest.
@@ -9,6 +9,9 @@
 import { watch, type FSWatcher, readFileSync, existsSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import type { Bridge } from './bridge.js';
+
+/** What `sync_scripts` writes: UserScripts and AgentScripts alike. */
+const SYNCED_EXTENSIONS = ['.user.js', '.agent.js'] as const;
 
 const LOG_PREFIX = '[customaise-mcp:watcher]';
 
@@ -25,15 +28,38 @@ export class FileWatcher {
   private debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private debounceMs = 500;
 
-  constructor(bridge: Bridge) {
+  /**
+   * When false, `start()` is a no-op.
+   *
+   * The daemon disables it unless `--watch`. Auto-export is a good default
+   * for a server an IDE spawned and kills with the session: a human is
+   * sitting there. A resident daemon is different on both counts. It writes
+   * scripts into the browser with nobody watching, and because no dispatch
+   * is cap-exempt, every file save silently spends a cap unit, so an agent
+   * iterating in an editor loop could drain a Free tier without ever calling
+   * a tool.
+   */
+  private enabled: boolean;
+
+  constructor(bridge: Bridge, opts: { enabled?: boolean } = {}) {
     this.bridge = bridge;
+    this.enabled = opts.enabled !== false;
+  }
+
+  /** Whether auto-export will actually happen if a sync arms this watcher. */
+  get isEnabled(): boolean {
+    return this.enabled;
   }
 
   /**
-   * Start watching a directory for .user.js changes.
+   * Start watching a directory for `.user.js` and `.agent.js` changes.
    * Replaces any previous watcher.
    */
   start(directory: string): void {
+    if (!this.enabled) {
+      console.error(`${LOG_PREFIX} Auto-export is off in daemon mode; start it with \`customaise-mcp daemon --watch\`.`);
+      return;
+    }
     // Stop previous watcher if any
     this.stop();
 
@@ -45,11 +71,15 @@ export class FileWatcher {
       return;
     }
 
-    console.error(`${LOG_PREFIX} Watching ${directory} for .user.js changes`);
+    console.error(`${LOG_PREFIX} Watching ${directory} for script changes`);
 
     // Use native fs.watch on the directory
     this.watcher = watch(directory, (eventType, filename) => {
-      if (!filename || !filename.endsWith('.user.js')) return;
+      // Both kinds, because `sync_scripts` writes both. Watching only
+      // `.user.js` meant every AgentScript it had just written was ignored:
+      // you could edit one, save, and nothing happened. Silent, and it broke
+      // the half of the product that registers WebMCP tools.
+      if (!filename || !SYNCED_EXTENSIONS.some((ext) => filename.endsWith(ext))) return;
       if (eventType === 'change' || eventType === 'rename') {
         const filePath = join(directory, filename);
         if (existsSync(filePath)) {
@@ -133,7 +163,7 @@ export class FileWatcher {
       // Send to extension via bridge. Auto-export from the file
       // watcher counts toward the user's MCP cap (ARD §4.1: every
       // successful tool dispatch counts) — same +1 as if the IDE had
-      // called export_script directly. dispatchTool throws McpError
+      // called export_script directly. dispatchTool throws ProtocolError
       // (cap-exceeded, etc.); on cap-exceeded we surface the message
       // to stderr but otherwise let the watcher keep running so a
       // later cap reset / tier upgrade resumes auto-sync without a

@@ -1,12 +1,22 @@
 # @customaise/mcp
 
-MCP server that connects AI coding agents to the [Customaise](https://customaise.com) Chrome extension. Manage UserScripts, build AgentScripts, call WebMCP tools inside the user's signed-in browser session, select DOM elements visually, and drive tabs directly from your IDE.
+MCP server and CLI that connect AI coding agents to the [Customaise](https://customaise.com) Chrome extension. Manage UserScripts, build AgentScripts, call WebMCP tools inside the user's signed-in browser session, select DOM elements visually, and drive tabs. Drive it over stdio from an IDE, or as a `customaise` command from a shell.
 
-**18 tools, 5 resources, WebSocket bridge** between your IDE and a real Chrome session.
+**19 tools, 5 resources, WebSocket bridge** between your agent and a real Chrome session, whichever door it arrives through.
+
+Two ways in. `customaise-mcp` is the MCP server an IDE spawns over stdio.
+`customaise` is a CLI for agents that have a shell instead, driving the same
+tools through a resident daemon. Both go through the same cap enforcement and
+the same consent gate.
 
 ```
 AI Agent ←(stdio)→ MCP Server ←(WebSocket)→ Customaise Extension
 ```
+
+Speaks the **MCP 2026-07-28 revision**, negotiated per connection: a client on
+that revision gets the stateless flow with cacheable `tools/list`, and a client
+on the 2025 revisions keeps working unchanged. The package is 3.x precisely so
+nobody has to guess this from a 2.x version number.
 
 ## Quick Start
 
@@ -25,6 +35,11 @@ Install the [Customaise Chrome extension](https://customaise.com) and enable **M
     }
   }
 }
+```
+
+**Claude Code** (one command, no file to edit):
+```bash
+claude mcp add customaise -- npx -y @customaise/mcp
 ```
 
 **Claude Desktop** (`claude_desktop_config.json`):
@@ -85,7 +100,7 @@ args = ["-y", "@customaise/mcp"]
 ### 3. Done
 Your agent can now read and edit UserScripts, build AgentScripts that expose WebMCP tools to it, select DOM elements visually, inspect the console, and take screenshots of the live tab.
 
-## Tools (18)
+## Tools (19)
 
 ### Script Lifecycle
 | Tool | Description |
@@ -115,7 +130,7 @@ Your agent can now read and edit UserScripts, build AgentScripts that expose Web
 | Tool | Description |
 |------|-------------|
 | `get_selected_elements` | Get the DOM elements the user has visually selected, with bulletproof selectors and screenshots |
-| `take_screenshot` | Capture the visible tab, optionally highlighting specific elements |
+| `take_screenshot` | Capture any tab (not just the visible one) as a viewport or full-page image |
 
 ### WebMCP Agent Tools
 | Tool | Description |
@@ -128,6 +143,11 @@ Your agent can now read and edit UserScripts, build AgentScripts that expose Web
 |------|-------------|
 | `toggle_ui` | Show or hide the Customaise UI overlay |
 | `sync_scripts` | Bulk export all scripts to a local directory |
+
+### Diagnostics
+| Tool | Description |
+|------|-------------|
+| `get_bridge_status` | Report extension attachment, plan tier, sign-in, and remaining daily and weekly quota. Costs no quota itself. |
 
 ## Resources (5)
 
@@ -181,6 +201,13 @@ Users can visually select elements in the browser, and the extension pushes cont
 > "env": { "CUSTOMAISE_WORKSPACE": "/absolute/path/to/your/project" }
 > ```
 
+> [!NOTE]
+> **From the CLI**, the directory you ran the command in wins over both. The
+> daemon is long-lived and was started from whatever directory you happened to
+> be in the first time, so it takes the caller's word for it on every command.
+> `CUSTOMAISE_WORKSPACE` still beats a plain cwd for IDE servers, unchanged.
+
+
 Use `get_selected_elements` to retrieve selections programmatically, or read the pushed `.dom.md` files directly from the workspace.
 
 Each selection includes **bulletproof tiered selectors** (stable IDs → data attributes → ARIA → semantic classes → structural positioning) so targeting survives page updates.
@@ -210,15 +237,6 @@ Each selection includes **bulletproof tiered selectors** (stable IDs → data at
 6. list_webmcp_tools                           → confirm tools surfaced
 7. call_webmcp_tool                            → invoke one; prompt-gated calls wait for user consent
 ```
-
-## Conventions resources
-
-Two MCP resources document the script formats and grant surface the extension exposes:
-
-- `customaise://userscript-conventions` — the `==UserScript==` metadata block, `@match` / `@grant` / `@connect` / `@require` / `@resource`, the `GM_*` API table, and the Customaise `CM_*` grants: `CM_promptAI` (on-device Gemini Nano via Chrome 148+ Prompt API, with sessions, streaming, and multimodal input), `CM_devtools` / `CM_withDevtools` (Chrome DevTools Protocol with per-session user opt-in), and `CM_findElement` / `CM_findExternalElement` (selector helpers that survive page updates).
-- `customaise://agentscript-conventions` — the `==AgentScript==` metadata block, `// @webmcp <tool> <permission>` declarations, the `navigator.modelContext.registerTool()` registration pattern, the consent gate, and the same `CM_*` and `GM_*` surface available to UserScripts.
-
-Read whichever fits the task before writing a script.
 
 ## File Sync
 
@@ -260,6 +278,8 @@ Once `sync_scripts` has been called, the MCP server watches the directory for `.
 | `CUSTOMAISE_MCP_EXTRA_EXTENSION_IDS` | _(empty)_ | Comma-separated list of extra extension IDs allowed to connect. Needed for unpacked dev builds with a non-standard extension ID |
 | `CUSTOMAISE_MCP_ALLOW_INSECURE` | _(unset)_ | Set to `1` to disable the origin allowlist. **Tests only.** Emits a loud warning at startup |
 | `CUSTOMAISE_WORKSPACE` | _(cwd)_ | Absolute path where `.customaise/` files should be written. Useful for IDEs that don't set cwd to the project root (Claude Desktop, Antigravity) |
+| `CUSTOMAISE_CONFIG_DIR` | `~/.config/customaise` | Where the CLI keeps its daemon connection file and remembered tab. Delete this directory to remove everything the CLI stores; uninstalling the extension does not, because these live outside the browser profile |
+| `CUSTOMAISE_HTTP_PORT` | `4051` | Loopback port the daemon serves the CLI on. Distinct from `CUSTOMAISE_WS_PORT`, which is the extension's WebSocket bridge |
 
 ## Security Boundary
 
@@ -272,14 +292,93 @@ The MCP server listens on `ws://localhost:4050` in plaintext on your loopback in
 
 **What this does NOT stop**: a malicious native process running as your user. Node's `ws` client (and most HTTP libraries) lets callers forge any Origin header. If you can't trust processes running as your OS user, the threat model is already broader than this bridge.
 
-**Defense in depth**: every `prompt`-permissioned tool still requires your explicit approval in the Customaise consent modal before running. Tools declared `allow` run without asking, so only install AgentScripts from sources you trust.
+**Defense in depth**: every `prompt`-permissioned tool still requires your explicit approval in the Customaise consent modal before running.
+
+Tools declared `allow` run without asking, with one exception that matters here: **a script written through this bridge or the `customaise` CLI does not get to grant itself `allow`.** Its self-declared `allow` resolves as `prompt`, so the first call shows you what the agent built. Choosing "Always allow" stores an override and it never prompts again. An agent that could clear its own gate would not be gated, and the whole point of the consent modal is that it lives somewhere the calling agent cannot reach.
+
+Scripts you wrote yourself, and scripts you subscribed to from the marketplace, are unaffected: `allow` means `allow`. For marketplace scripts that means the old advice still holds, so only subscribe to AgentScripts from sources you trust.
 
 **Dev builds**: if you load an unpacked extension with a custom key, set `CUSTOMAISE_MCP_EXTRA_EXTENSION_IDS=<your-extension-id>` in the MCP server's env.
 
+## CLI
+
+For an agent with a terminal rather than an MCP client.
+
+```sh
+npm i -g @customaise/mcp     # both binaries on PATH
+customaise doctor            # bridge, sign-in, tier, quota, and whether
+                             # "Allow user scripts" is on. Costs no quota.
+customaise init              # writes AGENTS.md in this project, so the next
+                             # agent finds the CLI without being told
+```
+
+```sh
+customaise scripts list
+customaise scripts install ./my-tool.agent.js
+customaise scripts get mcp_script_123 -o ./my-tool.agent.js
+customaise scripts enable mcp_script_123      # or disable
+customaise scripts fork shared_abc -o ./mine.agent.js
+customaise scripts rm mcp_script_123
+customaise sync ./customaise-scripts          # bulk export your scripts
+customaise tabs
+customaise tab reload 42
+customaise use --tab 42                      # remember it for later commands
+customaise tools                             # WebMCP tools on that tab
+customaise call my_tool --args '{"q":"hi"}'
+customaise context page                      # DOM snapshot
+customaise shot -o ./page.png
+customaise daemon status | stop
+```
+
+Without a global install, `npx -p @customaise/mcp customaise <verb>` works but
+costs roughly half a second of package resolution per command against about
+fifty milliseconds installed. For anything in a loop, install it.
+
+**Output contract.** JSON on stdout, always, so it pipes. Diagnostics on
+stderr. `--pretty` indents the JSON. Exit codes are the interface:
+
+| Code | Meaning |
+|---|---|
+| 0 | success |
+| 2 | usage error |
+| 3 | daemon or extension unreachable, including after signing out or with "Allow user scripts" off |
+| 4 | signed in, but the token expired or could not be refreshed |
+| 5 | free-tier cap reached |
+| 6 | consent denied by the user |
+| 7 | consent expired unanswered |
+| 8 | rejected by Customaise (diagnostics in the payload) |
+
+Two things make `3` more common than it looks. Signing out of Customaise tears
+the bridge down deliberately, so it reports `3`, not `4`. And the "Allow user
+scripts" toggle on the Customaise card in `chrome://extensions` resets on every
+Chrome restart; while it is off, scripts install fine and no tool ever
+registers, so `doctor` reports `3` rather than claiming a healthy setup that
+cannot run anything. `4` is the narrower case: the bridge is up and the token behind
+it went stale. Both mean stop, and both are worth telling the user about, but
+only `3` is worth checking Chrome over.
+
+Codes 5, 6 and 7 are deliberately distinct: an agent that cannot tell a cap
+from a refusal from a timeout retries into a wall. Code 8 is the one to
+handle first when installing scripts: the sanitization pipeline refused the
+file and the diagnostics say what to change, where a 1 means something broke
+and rewriting the script will not help.
+
+**The daemon.** Started on first use, and it holds the WebSocket to the
+extension so commands do not each pay for a reconnect. It binds `127.0.0.1`
+only and authenticates the CLI with a token in a `0600` file that exists only
+while the endpoint is live. `customaise daemon stop` ends it.
+
+When several customaise-mcp processes share a machine, the first to bind
+`:4050` leads and the rest relay through it, so one extension serves every
+IDE and every shell at once. That seam carries its own protocol version: a
+process built against different frames is refused rather than served, with an
+error naming both versions and which one to restart (`-32033`). Package
+versions may differ freely; only a change to the frames themselves moves it.
+
 ## Requirements
 
-- **Node.js** ≥ 18
-- **Chrome** with the Customaise extension installed (≥ 1.2.3 for the v2 bridge protocol — older extensions still work but don't surface the cap-usage display)
+- **Node.js** ≥ 20
+- **Chrome** with the Customaise extension installed (≥ 1.2.3 for the v2 bridge protocol; older extensions still work but don't surface the cap-usage display)
 - **MCP Bridge** enabled in Customaise Settings (free, signed-in)
 
 ## Plan tiers

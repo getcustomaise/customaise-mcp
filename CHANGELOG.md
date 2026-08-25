@@ -2,6 +2,57 @@
 
 All notable changes to `@customaise/mcp` will be documented in this file.
 
+## [3.0.0] - 2026-08-21
+
+### Added
+
+- **`customaise`, a terminal control plane.** A second binary alongside `customaise-mcp`. It talks to a resident daemon over a loopback MCP endpoint, so a coding agent with a shell can list scripts, install them, drive tabs and call WebMCP tools without an IDE in the loop.
+
+  ```sh
+  npm i -g @customaise/mcp
+  customaise doctor
+  customaise scripts install ./my-tool.agent.js
+  customaise tab reload 42
+  customaise call my_tool --args '{"q":"hello"}'
+  ```
+
+  JSON on stdout, diagnostics on stderr, and exit codes an agent can branch on: `0` ok, `2` usage, `3` extension or daemon unreachable (signing out counts, because it takes the bridge down with it), `4` the token expired or could not refresh while the bridge was up, `5` cap reached, `6` consent denied, `7` consent timed out, `8` rejected by Customaise. `8` is the one to handle first when installing scripts: it means the sanitization pipeline refused the file and the diagnostics in the payload say what to change, where `1` means something broke and rewriting the script will not help. Everything routes through the same cap enforcement and the same human-in-the-loop consent gate as the IDE path; the CLI is another door onto the same room, not a way around it.
+
+  The daemon starts on first use and stops with `customaise daemon stop`. It authenticates the CLI with a token in a `0600` file that only exists while the endpoint is live, and it binds `127.0.0.1` only.
+
+- **The CLI now tells you when "Allow user scripts" is off.** That toggle lives on the Customaise card in `chrome://extensions`, it resets every time Chrome restarts or the extension reloads, and while it is off no script runs and no WebMCP tool registers. The warning existed, but only in the half of a tool result a model reads: the CLI parses the structured half, deliberately kept as clean JSON, so a terminal agent got silence in exactly the situation the warning exists for. Installs succeeded, tools never appeared, and nothing said why. It is now a field on the structured result, printed to stderr so stdout stays pipeable, and `customaise doctor` reports `userScripts` and exits 3 rather than claiming a healthy setup that cannot run anything.
+
+- **The core loop no longer bills twice.** Five tools fetched the "Allow user scripts" banner with a second, invisible `dispatchTool`, and that dispatch spent a cap unit: `list_scripts`, `export_script`, `reload_tab`, `list_webmcp_tools` and `call_webmcp_tool`. The documented loop of install, reload, list, call therefore cost **eight units instead of four**, so the free tier's real budget for the workflow the product is built around was half what it advertises. The extension now attaches that state to every `dispatch_ack` and to `init_session`, so the banner is fresher than a cached fetch would be and costs nothing. No change to what counts as usage; the second call simply stopped existing.
+
+- **`get_bridge_status`, and `doctor` now costs nothing.** Reports whether the extension is attached, your plan tier, whether you are signed in, whether remote approvals are on, and how much of the cap is left today and this week. It spends **no cap units**: everything it reports already arrives on the bridge's `init_session` frame, so the server answers from state it holds rather than calling the browser. `customaise doctor` previously ran `list_tabs`, which meant working out why MCP was failing cost one of the fifty daily calls that might have been why it was failing. Fields that the extension has not reported come back as `unknown` rather than as a confident `false`.
+
+- **`--version` and `--help` on `customaise-mcp`.** The published install instructions have told every IDE flow to verify with `npx -y @customaise/mcp --version`. There was no argument handling, so that command started a stdio server and hung the terminal with no output: the one step meant to say "it worked" was the step that looked broken. It now prints the version and exits.
+
+- **Machine-readable tool errors.** Every tool now fails with a structured payload carrying a stable `type` alongside the human message, instead of a thrown string: `auth_required`, `cap_exceeded`, `extension_not_connected`, `dispatch_timeout`, `extension_outdated`, `integrity_violation`, `consent_denied`, `consent_timeout`, `internal_error`. Sixteen handlers previously threw untyped, which reached the client as an opaque failure that an agent could only respond to by retrying. Branch on `type`, never on the message text or the numeric code: the numbers sit in a range the `2026-07-28` revision has since reserved and may yet move, and the strings will not.
+
+### Changed
+
+- **Speaks the MCP `2026-07-28` revision, and still speaks `2025-11-25`.** The server now runs on the v2 SDK (`@modelcontextprotocol/server`) through its `serveStdio` entry, which negotiates the protocol revision per connection. A client that has not moved gets `2025-11-25`, the exact revision this server spoke before, served from the same factory. A 2026-capable client gets `2026-07-28`. One binary, both eras, nothing to configure and no flag day.
+
+  **Why the major version.** The package was at `2.0.7` while the specification revision is colloquially called "MCP 2.0", so `2.0.7` read as though it already spoke it. It did not. Shipping the real migration as `2.1.0` would have made that worse, so the version jumps to make the two numbers stop arguing. Nothing about the extension-to-server bridge protocol changed: `MIN_EXTENSION_VERSION` is still `1.2.3` and no working install is stranded.
+
+- **Node 20 or newer is now required** (was 18), following the v2 SDK's floor. Claude Desktop bundles its own Node and clears this comfortably.
+
+- **zod 4.2 or newer is now required** (was 3.24), also following the SDK. Tool descriptions written with `.describe()` are preserved through the new schema conversion, and the emitted JSON Schema now declares the 2020-12 dialect.
+
+- **Tool and resource list results carry cache hints on 2026-07-28 connections.** `tools/list`, `resources/list`, `resources/templates/list` and `server/discover` advertise a one-hour TTL, because those registration sets are fixed at build time. `resources/read` deliberately does not: it covers `customaise://scripts`, which is your live script library, and a cached copy of that would have an agent writing against scripts you no longer have. The three static conventions handbooks opt into caching individually. Everything is `cacheScope: private`.
+
+### Fixed
+
+- **A second MCP process no longer breaks when the first one exits.** Only one `customaise-mcp` binds the extension's WebSocket port; the rest run as followers and proxy through it. When that leader went away, followers never reattached, so restarting one IDE left every other MCP client and the CLI daemon returning "extension not connected" until each was restarted by hand. Followers now reconnect with a capped backoff and pick up whichever process holds the port next. The code comment describing the old behaviour claimed a promotion mechanism that was never implemented, which is why this survived review.
+
+- **The connected-IDE name no longer disappears on modern clients.** Client identity arrives through the `initialize` handshake on `2025-11-25` and through a per-request `_meta` envelope on `2026-07-28`, and neither source is populated in the other era. The server now reads both, so the extension's Settings panel names the connected IDE whichever revision it negotiated.
+
+### Internal
+
+- The test suite no longer substitutes a hand-written stub for the MCP SDK. It had done so since March, which meant 105 tests had never exercised the library they describe. Removing the substitution required no test changes.
+- `mcp/` is covered by the repository's CI for the first time, along with a changelog currency gate mirroring the extension's.
+
 ## [2.0.7] - 2026-05-28
 
 ### Added
@@ -64,8 +115,11 @@ All notable changes to `@customaise/mcp` will be documented in this file.
   - `-32030 MCP_DISPATCH_TIMEOUT`. Extension did not ack within the configured window (default 90s, override via `CUSTOMAISE_MCP_DISPATCH_TIMEOUT_MS`).
   - `-32031 MCP_EXTENSION_OUTDATED`. Update Customaise from the Chrome Web Store.
   - `-32032 MCP_INTEGRITY_VIOLATION`. Reconnect MCP from the Customaise extension Settings.
+  - `-32033 MCP_RELAY_PROTOCOL_MISMATCH`. Two customaise-mcp processes on this machine were built against different relay frame vocabularies. The error names both versions; restart the older process (usually the IDE-spawned server, or `customaise daemon stop`).
 
 ### Changed (breaking)
+- **Leader/follower relay contract.** When several customaise-mcp processes share one machine, the first binds `:4050` and the rest relay through it. That seam now carries its own protocol version, negotiated at attach: the leader evicts a follower from a different contract, and a follower refuses to dispatch through a leader from one, each with an error naming both versions and which process to restart. Package versions may differ freely across a rollout; only frame-shape changes move this number.
+
 - **v2 bridge protocol.** The WebSocket frames between the MCP server and the Customaise extension changed shape. **This MCP server requires Customaise extension 1.2.3 or newer.** Older extensions return `-32031 MCP_EXTENSION_OUTDATED` on first dispatch.
 - **Server version reported on the MCP handshake** is now `2.0.0`.
 

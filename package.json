@@ -1,24 +1,27 @@
 {
   "name": "@customaise/mcp",
-  "version": "2.0.7",
-  "description": "MCP server bridging AI coding agents (Cursor, Claude Code, Codex, Windsurf, Kiro, Antigravity) to the Customaise Chrome extension. 18 tools: UserScripts, AgentScripts, WebMCP calls with HITL consent, visual DOM targeting, tab control.",
+  "version": "3.0.0",
+  "description": "MCP server and CLI bridging AI coding agents (Cursor, Claude Code, Codex, Windsurf, Kiro, Antigravity, Claude Desktop) to the Customaise Chrome extension. 19 tools: UserScripts, AgentScripts, WebMCP calls with HITL consent, visual DOM targeting, tab control. Drive it over stdio from an IDE, or as a `customaise` command from a shell.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "customaise-mcp": "dist/index.js"
+    "customaise-mcp": "dist/index.js",
+    "customaise": "dist/cli/index.js"
   },
   "files": [
     "dist/",
+    "!dist/**/*.map",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
     "build": "tsc",
+    "build:mcpb": "node mcpb/build.mjs",
     "start": "node dist/index.js",
     "dev": "node --loader ts-node/esm src/index.ts",
-    "test": "tsc -p tsconfig.test.json && node --loader ./test-loader.mjs --test test-out/__tests__/*.test.js",
-    "prepublishOnly": "npm run build"
+    "test": "tsc -p tsconfig.test.json && node --test test-out/__tests__/*.test.js",
+    "prepublishOnly": "npm run build && npm test"
   },
   "keywords": [
     "mcp",
@@ -37,7 +40,11 @@
     "windsurf",
     "codex",
     "kiro",
-    "antigravity"
+    "antigravity",
+    "cli",
+    "command-line",
+    "claude-desktop",
+    "mcpb"
   ],
   "author": "CNDLE Studio LTD",
   "license": "MIT",
@@ -47,21 +54,25 @@
     "url": "git+https://github.com/getcustomaise/customaise-mcp.git"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.26.0",
-    "sharp": "^0.34.5",
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
     "ws": "^8.18.0",
-    "zod": "^3.24.0"
+    "zod": "^4.2.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "@types/sharp": "^0.31.1",
     "@types/ws": "^8.5.0",
     "ts-node": "^10.9.0",
     "tsx": "^4.21.0",
-    "typescript": "^5.7.0",
-    "vitest": "^4.1.0"
+    "typescript": "^5.7.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "bugs": {
+    "url": "https://github.com/getcustomaise/feedback/issues"
   }
 }
