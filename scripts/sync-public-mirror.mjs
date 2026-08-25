@@ -222,7 +222,11 @@ Next, by hand:
   cd ${applyDir}
   git status && git diff        # review before you publish
   git add -A && git commit -m "sync ${JSON.parse(readFileSync(join(PKG_DIR, 'package.json'), 'utf-8')).version}"
-  git push origin main`);
+  git push origin main
+  git tag v${JSON.parse(readFileSync(join(PKG_DIR, 'package.json'), 'utf-8')).version} && git push origin v${JSON.parse(readFileSync(join(PKG_DIR, 'package.json'), 'utf-8')).version}
+  gh release create v${JSON.parse(readFileSync(join(PKG_DIR, 'package.json'), 'utf-8')).version} --repo getcustomaise/customaise-mcp --title "..." --notes "..."
+  # Releases do not create themselves: 2.0.7, 3.0.0 and 3.1.0 all reached
+  # npm while the repo's Latest release sat at 2.0.2 for three months.`);
     return 0;
   }
 
