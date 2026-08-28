@@ -14,12 +14,13 @@
  * to bind :4050 and any second instance died with EADDRINUSE, surfacing
  * as `MCP error -32000: Connection closed` in the losing IDE. That made
  * it impossible to run two agents (e.g. Cursor + Claude Code) against
- * the same extension. The factory below auto-detects who's leader and
- * who's a follower; the caller (index.ts / server.ts) doesn't care.
+ * the same extension. `createBridge` below hands back an `ElectingBridge`,
+ * which decides who's leader and who's a follower and re-decides it every
+ * time that changes; the caller (index.ts / daemon.ts) doesn't care.
  */
 
-import { ExtensionBridge } from './extension-bridge.js';
-import { RemoteBridge } from './remote-bridge.js';
+import { ElectingBridge } from './electing-bridge.js';
+import type { PendingDispatchInfo } from './request-context.js';
 
 /**
  * Identifies which IDE spawned a customaise-mcp process. Captured from
@@ -41,6 +42,8 @@ export interface DispatchOptions {
    * coming back for the answer.
    */
   signal?: AbortSignal;
+  /** See `RequestContext.onPending`; an explicit one wins over the context's. */
+  onPending?: (info: PendingDispatchInfo) => void;
 }
 
 /**
@@ -75,6 +78,21 @@ export interface DispatchOptions {
  * still free to introduce because no fleet exists.
  */
 export const RELAY_PROTOCOL_VERSION = 1;
+
+/**
+ * WebSocket close code a leader uses when it steps down for a newer
+ * follower, and how long the OTHER followers hold back before re-racing.
+ *
+ * Without the hold-back, abdication is a coin toss: every follower re-elects
+ * the instant the leader closes, and an older one wins the bind as often as
+ * the newer one does. Each wrong toss costs a full extension reconnect. The
+ * reason string names the version being yielded to; a follower that IS that
+ * version races at once, every other one waits this long first. A follower
+ * built before this code sees an unknown close code and races immediately,
+ * which is the old behaviour and still converges, just less often first time.
+ */
+export const STEP_DOWN_CLOSE_CODE = 4002;
+export const STEP_DOWN_YIELD_MS = 300;
 
 export interface BridgeSessionSnapshot {
   extensionConnected: boolean;
@@ -113,9 +131,10 @@ export interface SystemStatusSnapshot {
 
 export interface Bridge {
   /**
-   * Become ready. For the leader: bind the WS port. For a follower:
-   * connect to the leader. Rejects with EADDRINUSE if the leader path
-   * failed because :port is already held by another process.
+   * Become ready. For the leader: bind the WS port; rejects with EADDRINUSE
+   * if :port is already held. For a follower: connect to the leader. For the
+   * `ElectingBridge` production holds: run the election, which turns the
+   * first two outcomes into each other until one sticks.
    */
   start(): Promise<void>;
 
@@ -209,40 +228,20 @@ export interface Bridge {
 }
 
 /**
- * Try to start as leader; fall back to follower on EADDRINUSE.
+ * Construct the bridge production code holds.
  *
- * This is the only way to construct a bridge from outside the module —
- * the class constructors are available for tests, but production code
- * should always go through here so the port-contention logic stays
- * centralised.
+ * This is the only way to construct a bridge from outside the module — the
+ * class constructors are available for tests, but production code should
+ * always go through here so the port-contention logic stays centralised.
+ * Leadership is decided by `ElectingBridge`, which races the port at
+ * startup and again whenever a follower's leader goes away; see that file
+ * for why neither loss is terminal.
  */
 export async function createBridge(
   port: number = 4050,
   requestTimeoutMs: number = 30_000,
 ): Promise<Bridge> {
-  const local = new ExtensionBridge(port, requestTimeoutMs);
-  try {
-    await local.start();
-    process.stderr.write(`[customaise-mcp] Bridge role=leader, listening on :${port}\n`);
-    return local;
-  } catch (err: any) {
-    if (err?.code !== 'EADDRINUSE') {
-      throw err;
-    }
-    // Port is already held by another customaise-mcp process. Become a
-    // follower: connect to that process over WebSocket and proxy all
-    // bridge traffic through it. The leader multiplexes responses and
-    // pushes back to every follower.
-    //
-    // Important: do NOT call local.close() here. When bind failed, the
-    // WSS never entered the listening state; close()'s callback
-    // behaviour on a never-listened server is library-defined and
-    // could hang or throw. The ExtensionBridge instance is unused and
-    // will be GC'd.
-    process.stderr.write(`[customaise-mcp] :${port} in use — starting as follower\n`);
-    const remote = new RemoteBridge(port, requestTimeoutMs);
-    await remote.start();
-    process.stderr.write(`[customaise-mcp] Bridge role=follower, connected to leader on :${port}\n`);
-    return remote;
-  }
+  const bridge = new ElectingBridge(port, requestTimeoutMs);
+  await bridge.start();
+  return bridge;
 }

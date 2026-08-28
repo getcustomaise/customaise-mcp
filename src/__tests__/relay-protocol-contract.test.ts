@@ -94,7 +94,11 @@ describe('relay protocol contract', () => {
       ws.on('close', (code, reason) => { closeCode = code; closeReason = reason.toString(); resolve(); });
     });
     ws.on('open', () => {
-      ws.send(JSON.stringify({ role: 'follower-hello', relayProtocol: 999, version: '99.0.0' }));
+      // An OLDER package on a different contract. A newer one is yielded to
+      // rather than evicted (leader-election.test.ts), because the newer
+      // process can always evict us and its message points at a process that
+      // can actually be restarted; ours would point at an immortal daemon.
+      ws.send(JSON.stringify({ role: 'follower-hello', relayProtocol: 999, version: '0.0.1' }));
     });
     // Bounded, so a leader that NOTICES the mismatch but no longer evicts
     // fails this test in three seconds instead of hanging the whole suite —

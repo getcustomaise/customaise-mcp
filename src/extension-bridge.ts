@@ -28,8 +28,9 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { ProtocolError } from "@modelcontextprotocol/server";
 import type { Bridge, BridgeClientInfo, BridgeSessionSnapshot, SystemStatusSnapshot, DispatchOptions } from './bridge.js';
-import { RELAY_PROTOCOL_VERSION } from './bridge.js';
+import { RELAY_PROTOCOL_VERSION, STEP_DOWN_CLOSE_CODE } from './bridge.js';
 import { currentRequestContext } from './request-context.js';
+import type { PendingDispatchInfo } from './request-context.js';
 import {
   type CapSession,
   applyAck,
@@ -46,6 +47,8 @@ import {
   markLegacy,
   rolloverDailyIfNeeded,
   takeNextSeqNum,
+  normalizeErrorCode,
+  compareVersions,
 } from './cap-state.js';
 
 /**
@@ -101,6 +104,14 @@ const INIT_SESSION_GRACE_MS = (() => {
  * AgentScripts) can bump via the env var without code changes. Tools
  * that consistently exceed 30s are candidates for a slow-tool API in v2.
  */
+/**
+ * How long `close()` gives peers to finish their close handshake before
+ * terminating them. Long enough for a healthy follower on loopback (the
+ * handshake is one round trip), short enough that a step-down is not held
+ * hostage by a peer that will not answer.
+ */
+const CLOSE_GRACE_MS = 2_000;
+
 const DISPATCH_ACK_TIMEOUT_MS = (() => {
   const env = Number(process.env.CUSTOMAISE_MCP_DISPATCH_TIMEOUT_MS);
   return Number.isFinite(env) && env > 0 ? env : 30_000;
@@ -276,6 +287,11 @@ export class ExtensionBridge implements Bridge {
   private extensionSocket: WebSocket | null = null;
   private followerSockets = new Set<WebSocket>();
   private followerClientInfos = new Map<WebSocket, BridgeClientInfo>();
+  private newerFollowerHandler: ((version: string) => void) | null = null;
+  /** Followers whose hello carried a newer version, awaiting their client-info. */
+  private followerVersions = new Map<WebSocket, string>();
+  /** Set by `stepDown`; changes the close code `close()` sends to followers. */
+  private steppingDownFor: string | null = null;
   private myClientInfo: BridgeClientInfo | null = null;
   private pending = new Map<string, PendingRequest>();
   private port: number;
@@ -307,6 +323,7 @@ export class ExtensionBridge implements Bridge {
     tool: string;
     origin: 'leader' | WebSocket;
     followerOrigId?: string;
+    onPending?: (info: PendingDispatchInfo) => void;
   }>();
   // Resolves when init_session arrives OR the grace timer marks the
   // session legacy. dispatchTool() awaits this before deciding which
@@ -501,7 +518,9 @@ export class ExtensionBridge implements Bridge {
       pending.reject(
         new ProtocolError(
           ERROR_CODE_DISPATCH_TIMEOUT,
-          `MCP dispatch aborted: extension disconnected (${reason}). Reconnect MCP from Customaise extension Settings.`,
+          reason === 'stepping_down'
+            ? 'MCP dispatch interrupted: this bridge handed the connection to a newer customaise-mcp. Retry the request.'
+            : `MCP dispatch aborted: extension disconnected (${reason}). Reconnect MCP from Customaise extension Settings.`,
           { type: 'dispatch_timeout', reason },
         ),
       );
@@ -604,6 +623,7 @@ export class ExtensionBridge implements Bridge {
       this.followerSockets.delete(ws);
       const hadClientInfo = this.followerClientInfos.has(ws);
       this.followerClientInfos.delete(ws);
+      this.followerVersions.delete(ws);
       // Reject any v1 requests still in-flight on behalf of this follower.
       for (const [id, pending] of this.pending) {
         if (pending.origin === ws) {
@@ -677,6 +697,38 @@ export class ExtensionBridge implements Bridge {
     // failure mode this constant exists to kill. The follower gets a close
     // reason it can surface verbatim. See RELAY_PROTOCOL_VERSION in bridge.ts.
     if (message.role === 'follower-hello') {
+      // A follower from a newer package. A leader that holds the port for
+      // as long as Chrome is open (a resident daemon does) would otherwise
+      // pin every editor on this machine to its version forever: the
+      // extension nags "update available" for an update the user already
+      // installed, and nothing but `customaise daemon stop` clears it. So
+      // the newer process is handed the port. See ElectingBridge.abdicate.
+      //
+      // Checked BEFORE the relay contract, on purpose. A newer package that
+      // also bumped the relay protocol would otherwise be evicted here with
+      // "restart the older of the two", and the older one is this immortal
+      // daemon: the exact stuck state stepping down exists to end. Yield
+      // first; if the new leader cannot speak to us it evicts us instead,
+      // and the message then points at a process that can actually go.
+      //
+      // Noted here, acted on when the follower identifies itself. Claude
+      // Desktop spawns a disposable copy of this server purely to probe the
+      // protocol revision and reaps it a second later; it connects, sends
+      // this hello, and never a client-info. Yielding to it meant handing
+      // over the port twice on every Desktop update, one extension
+      // reconnect each. A real follower identifies within milliseconds
+      // (an IDE server on its MCP initialize, the daemon at startup), so
+      // waiting costs nothing, and a socket that only ever says hello can
+      // never move the port.
+      //
+      // Sliced like client-info: this string ends up in a WebSocket close
+      // reason, which the protocol caps at 123 bytes.
+      const followerVersion = typeof message.version === 'string' ? message.version.slice(0, 64) : null;
+      if (followerVersion && compareVersions(followerVersion, MCP_VERSION) > 0) {
+        this._log(`Follower runs ${followerVersion}, newer than this leader's ${MCP_VERSION}; will yield once it identifies itself`);
+        this.followerVersions.set(ws, followerVersion);
+        return;
+      }
       if (message.relayProtocol !== RELAY_PROTOCOL_VERSION) {
         this._log(
           `Evicting follower: relay protocol ${message.relayProtocol} != ${RELAY_PROTOCOL_VERSION}` +
@@ -702,6 +754,15 @@ export class ExtensionBridge implements Bridge {
         if (current && current.name === next.name && current.version === next.version) return;
         this.followerClientInfos.set(ws, next);
         this._sendHelloToExtension();
+        // A newer package that has now identified itself: hand it the port.
+        const newer = this.followerVersions.get(ws);
+        if (newer) {
+          this.followerVersions.delete(ws);
+          this._log(`Follower ${next.name} runs ${newer}, newer than this leader's ${MCP_VERSION}`);
+          try { this.newerFollowerHandler?.(newer); } catch (err) {
+            this._log(`newerFollowerHandler threw: ${(err as Error).message}`);
+          }
+        }
       }
       return;
     }
@@ -855,6 +916,22 @@ export class ExtensionBridge implements Bridge {
   }
 
   /**
+   * Called once per follower whose package version is strictly newer than
+   * this leader's. `ElectingBridge` answers by stepping down.
+   */
+  onNewerFollower(handler: (version: string) => void): void {
+    this.newerFollowerHandler = handler;
+  }
+
+  /**
+   * Mark the coming `close()` as a step-down for `version`, so followers are
+   * told which process to let bind first rather than "leader shutting down".
+   */
+  stepDown(version: string): void {
+    this.steppingDownFor = version;
+  }
+
+  /**
    * Whether the extension is currently connected.
    */
   get isConnected(): boolean {
@@ -921,34 +998,83 @@ export class ExtensionBridge implements Bridge {
    * Close the WebSocket server and all connections.
    */
   async close(): Promise<void> {
+    // A step-down is a hand-over, not an exit: the port is back within a
+    // second under a newer process. A call caught in it should be told to
+    // retry, not to go and reconnect MCP from Settings.
+    const why = this.steppingDownFor ? 'stepping_down' : 'shutting_down';
     // Reject all pending requests (v1 protocol)
     for (const [, pending] of this.pending) {
       clearTimeout(pending.timer);
-      pending.reject(new Error('Bridge is shutting down'));
+      pending.reject(new ProtocolError(
+        ERROR_CODE_DISPATCH_TIMEOUT,
+        'Bridge is shutting down' + (why === 'stepping_down' ? ' to hand over to a newer customaise-mcp. Retry the request.' : '.'),
+        { type: 'dispatch_timeout', reason: why },
+      ));
     }
     this.pending.clear();
+    // Tell the extension to close any consent modal these dispatches were
+    // waiting on. The abort path does this per call; nothing did it for a
+    // close, so a modal open at the moment an IDE quit (or, now, at a
+    // step-down) stayed on screen for its full five minutes asking about a
+    // call nobody was coming back for. Must go BEFORE the socket closes: the
+    // extension drops its in-flight consent table on disconnect, and a
+    // cancel for an entry it no longer holds is ignored.
+    if (this.extensionSocket?.readyState === WebSocket.OPEN && this.capSession && this.dispatchPending.size) {
+      const sessionId = this.capSession.sessionId;
+      for (const [seqNum] of this.dispatchPending) {
+        try {
+          this.extensionSocket.send(JSON.stringify({
+            type: 'cancel_dispatch', session_id: sessionId, seq_num: seqNum,
+            reason: why === 'stepping_down' ? 'bridge handing over to a newer customaise-mcp' : 'bridge shutting down',
+          }));
+        } catch { /* the socket going away has the same effect */ }
+      }
+    }
     // Reject all in-flight v2 dispatches and tear down session state.
-    this._resetCapSession('shutting_down');
+    this._resetCapSession(why);
 
+    // Every socket gets a graceful close first, so the peer sees a code
+    // and a reason; whatever is still open after a short grace is
+    // terminated. Two things this bounds. A close() that throws (ws
+    // rejects a reason over 123 bytes with a RangeError) used to be
+    // swallowed and the socket left open, so that follower never got its
+    // 4002, never re-elected, and sat wedged on a listener that had
+    // already gone. And a peer that does not answer its close handshake
+    // holds the socket for ws's own 30-second close timeout, which at
+    // shutdown merely delays an exit but on the step-down path keeps a
+    // stale link alive under the new leader for half a minute.
+    const stragglers = new Set<WebSocket>();
     if (this.extensionSocket) {
-      this.extensionSocket.close(1000, 'MCP server shutting down');
+      stragglers.add(this.extensionSocket);
+      try { this.extensionSocket.close(1000, 'MCP server shutting down'); } catch { /* terminated below */ }
       this.extensionSocket = null;
     }
 
+    // A step-down names the version it yields to, so followers can let that
+    // one bind first; see STEP_DOWN_CLOSE_CODE in bridge.ts. Capped: a
+    // reason over 123 bytes makes ws throw instead of closing.
+    const [code, reason] = this.steppingDownFor
+      ? [STEP_DOWN_CLOSE_CODE, `stepping_down for ${this.steppingDownFor}: a newer customaise-mcp is taking the port`.slice(0, 120)]
+      : [1001, 'Leader shutting down'];
     for (const f of this.followerSockets) {
-      try { f.close(1001, 'Leader shutting down'); } catch { /* ignore */ }
+      stragglers.add(f);
+      try { f.close(code, reason); } catch { /* terminated below */ }
     }
     this.followerSockets.clear();
 
     return new Promise((resolve) => {
-      if (this.wss) {
-        this.wss.close(() => {
-          this.wss = null;
-          resolve();
-        });
-      } else {
+      if (!this.wss) { resolve(); return; }
+      const sweep = setTimeout(() => {
+        for (const s of stragglers) {
+          if (s.readyState !== WebSocket.CLOSED) { try { s.terminate(); } catch { /* gone */ } }
+        }
+      }, CLOSE_GRACE_MS);
+      sweep.unref?.();
+      this.wss.close(() => {
+        clearTimeout(sweep);
+        this.wss = null;
         resolve();
-      }
+      });
     });
   }
 
@@ -1176,7 +1302,8 @@ export class ExtensionBridge implements Bridge {
       const err: Error & { code?: number; data?: unknown } = new Error(
         ack.error || `Tool '${pending.tool}' refused by extension (code=${ack.error_code})`,
       );
-      err.code = ack.error_code;
+      // A pre-3.2.0 extension still sends the old reserved-band code.
+      err.code = normalizeErrorCode(ack.error_code);
       err.data = ack.error_data ?? undefined;
       pending.reject(err);
     } else {
@@ -1242,6 +1369,14 @@ export class ExtensionBridge implements Bridge {
       });
     }
     this._log(`Dispatch ${frame.seq_num} (tool=${pending.tool}) extended to ${extendMs}ms (reason: ${frame.reason || 'awaiting_user_consent'})`);
+    // And to the MCP client, as progress. Without this the client's own
+    // request timeout (60s in most IDEs) fires while the user is still
+    // deciding, and the approval they then give is delivered to nobody.
+    try {
+      pending.onPending?.({ expectedTimeoutMs: extendMs, reason: frame.reason || 'awaiting_user_consent' });
+    } catch (err) {
+      this._log(`onPending threw: ${(err as Error).message}`);
+    }
   }
 
   /**
@@ -1362,7 +1497,10 @@ export class ExtensionBridge implements Bridge {
         );
       }, DISPATCH_ACK_TIMEOUT_MS);
 
-      this.dispatchPending.set(seqNum, { resolve, reject, timer, tool: toolName, origin, followerOrigId });
+      this.dispatchPending.set(seqNum, {
+        resolve, reject, timer, tool: toolName, origin, followerOrigId,
+        onPending: opts.onPending ?? currentRequestContext().onPending,
+      });
 
       // Caller abandoned the request (Ctrl-C on the CLI, a cancelled IDE
       // call). Tell the extension so it closes the consent modal this

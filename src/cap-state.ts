@@ -16,16 +16,65 @@ export const DAILY_CAP = 50;
 export const WEEKLY_CAP = 150;
 
 /**
- * JSON-RPC server-error codes (in the implementation-defined
- * -32000..-32099 range so MCP clients treat them as transient and
- * actionable, NOT as fatal/cacheable like -32603). Locked by ARD §8.
+ * JSON-RPC error codes for the failures a client must branch on.
+ *
+ * Outside the JSON-RPC reserved range (-32768..-32000), as the 2026-07-28
+ * revision requires. It partitioned -32020..-32099 for the specification
+ * itself ("Implementations MUST NOT emit any code from this sub-range that is
+ * not defined by this specification") and sent new codes outside the
+ * reserved range altogether. The previous values, -32028..-32033, sat inside
+ * that band, and the spec's own allocations (-32020, -32021, -32022) were
+ * walking toward them.
+ *
+ * `error.type` is the discriminator everywhere; nothing branches on these
+ * numbers (see tool-envelope.ts). They exist for logs and continuity, which
+ * is why the new values keep the old last digits.
  */
-export const ERROR_CODE_AUTH_REQUIRED = -32028;
-export const ERROR_CODE_CAP_EXCEEDED = -32029;
-export const ERROR_CODE_DISPATCH_TIMEOUT = -32030;
-export const ERROR_CODE_EXTENSION_OUTDATED = -32031;
-export const ERROR_CODE_INTEGRITY_VIOLATION = -32032;
-export const ERROR_CODE_RELAY_PROTOCOL_MISMATCH = -32033;
+export const ERROR_CODE_AUTH_REQUIRED = -40028;
+export const ERROR_CODE_CAP_EXCEEDED = -40029;
+export const ERROR_CODE_DISPATCH_TIMEOUT = -40030;
+export const ERROR_CODE_EXTENSION_OUTDATED = -40031;
+export const ERROR_CODE_INTEGRITY_VIOLATION = -40032;
+export const ERROR_CODE_RELAY_PROTOCOL_MISMATCH = -40033;
+
+/**
+ * The codes a pre-3.2.0 extension or leader still emits.
+ *
+ * Accepted on every ingress (extension ack, leader relay) and mapped to the
+ * current value, so a mixed fleet never shows two numbers for one condition.
+ * Removable after a full Web Store update cycle; until then an extension
+ * built before the move is the common case, not the edge.
+ */
+export const LEGACY_ERROR_CODES: Readonly<Record<number, number>> = {
+  [-32028]: ERROR_CODE_AUTH_REQUIRED,
+  [-32029]: ERROR_CODE_CAP_EXCEEDED,
+  [-32030]: ERROR_CODE_DISPATCH_TIMEOUT,
+  [-32031]: ERROR_CODE_EXTENSION_OUTDATED,
+  [-32032]: ERROR_CODE_INTEGRITY_VIOLATION,
+  [-32033]: ERROR_CODE_RELAY_PROTOCOL_MISMATCH,
+};
+
+export function normalizeErrorCode(code: number): number {
+  return LEGACY_ERROR_CODES[code] ?? code;
+}
+
+/**
+ * Numeric major.minor.patch comparison; -1 / 0 / 1.
+ *
+ * A prerelease suffix is ignored on purpose, so `3.3.0-rc.1` compares equal
+ * to `3.3.0`. The one consumer is leader abdication, which must never flap:
+ * two processes that differ only by a tag are the same release for the
+ * purpose of who holds the port, and "equal" is the value that does nothing.
+ */
+export function compareVersions(a: string, b: string): number {
+  const parse = (v: string) => v.split('-')[0].split('.').map((n) => parseInt(n, 10) || 0);
+  const [x, y] = [parse(a), parse(b)];
+  for (let i = 0; i < 3; i++) {
+    const d = (x[i] ?? 0) - (y[i] ?? 0);
+    if (d !== 0) return Math.sign(d);
+  }
+  return 0;
+}
 
 /**
  * Semantic states for a session. The server-side cap behaviour branches

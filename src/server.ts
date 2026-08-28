@@ -799,7 +799,7 @@ IMPORTANT: Save files inside your current workspace or project directory (e.g., 
             });
 
 
-  server.registerTool('call_webmcp_tool', { description: 'Execute a registered WebMCP tool directly on the target browser tab. If the tool is interactive (trust level), the user will be natively prompted by CustomAIse to approve the execution before it returns.', inputSchema: z.object({
+  server.registerTool('call_webmcp_tool', { description: 'Execute a registered WebMCP tool directly on the target browser tab. If the tool is interactive (trust level), the user will be natively prompted by CustomAIse to approve the execution before it returns. Approval can take minutes when the user is away from the browser (remote approvals on a phone). This server sends progress notifications while it waits, so a client that resets its timeout on progress will wait with it. A client that caps tool calls at a fixed 60 seconds regardless will report this call as failed while the user can still approve it and the tool can still run; if that happens, do not blindly re-issue a call with side effects. Check the outcome first with a read-only tool or the page itself.', inputSchema: z.object({
               tabId: z.number().optional().describe('Tab ID to execute on. Defaults to active tab.'),
               toolName: z.string().describe('The EXACT name of the WebMCP tool to invoke'),
               toolArgs: z.record(z.string(), z.any()).optional().describe('JSON object of arguments for the tool')

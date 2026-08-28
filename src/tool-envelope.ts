@@ -54,8 +54,8 @@
  * `error.type` is a stable string; the numeric code is carried alongside
  * for continuity with `cap-state.ts` but nothing should branch on it. The
  * 2026-07-28 revision reserved `-32020`..`-32099` for the specification,
- * and these five predate that, so the numbers may yet move. The strings
- * will not.
+ * which is why the numbers moved once already (-3202x to -4002x in 3.2.0)
+ * while every string stayed put.
  */
 
 import {
@@ -140,10 +140,33 @@ export function installToolEnvelope(
       if (opts.onClientInfo) {
         try { opts.onClientInfo(ctx?.mcpReq?.envelope?.[CLIENT_INFO_META_KEY]); } catch { /* never break a tool call for a label */ }
       }
+      // Progress, only when asked for: the spec sends `notifications/progress`
+      // solely for requests that carried a `progressToken`. Each consent
+      // extension from the extension becomes one tick, which is what lets a
+      // client that resets its timeout on progress outlive a long approval.
+      const progressToken = ctx?.mcpReq?._meta?.progressToken;
+      const notify = ctx?.mcpReq?.notify;
+      let ticks = 0;
+      const onPending = progressToken !== undefined && typeof notify === 'function'
+        ? (info: { expectedTimeoutMs: number; reason: string }) => {
+            const seconds = Math.round(info.expectedTimeoutMs / 1000);
+            try {
+              Promise.resolve(notify({
+                method: 'notifications/progress',
+                params: {
+                  progressToken,
+                  progress: ++ticks,
+                  message: `Waiting for the user to approve in Customaise (${info.reason}); the bridge will wait up to ${seconds}s more.`,
+                },
+              })).catch(() => { /* a progress frame the client dropped is not an error */ });
+            } catch { /* same */ }
+          }
+        : undefined;
       // Run inside the request context so the dispatch layer can see this
-      // call's abort signal without every handler having to pass it down.
+      // call's abort signal and progress hook without every handler having
+      // to pass them down.
       try {
-        return await withRequestContext({ signal: ctx?.mcpReq?.signal }, () => handler(args, ctx));
+        return await withRequestContext({ signal: ctx?.mcpReq?.signal, onPending }, () => handler(args, ctx));
       } catch (err) {
         return toStructuredError(err);
       }

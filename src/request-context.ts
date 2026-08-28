@@ -15,8 +15,22 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 
+export interface PendingDispatchInfo {
+  /** How long the bridge will now wait before giving up, from this moment. */
+  expectedTimeoutMs: number;
+  reason: string;
+}
+
 export interface RequestContext {
   signal?: AbortSignal;
+  /**
+   * Called each time the extension reports that a dispatch is waiting on the
+   * user (a consent modal, a remote approval). The tool envelope turns it
+   * into `notifications/progress` when the client asked for progress, which
+   * is the only thing that keeps a 60-second client timeout from killing a
+   * five-minute approval. Absent when the client sent no `progressToken`.
+   */
+  onPending?: (info: PendingDispatchInfo) => void;
   /**
    * Where this caller is standing.
    *

@@ -45,11 +45,17 @@ const SRC = findSrcDir();
 const UNREACHABLE_MESSAGES = [
   'Customaise extension is not connected',
   'Leader bridge is not connected',
+  'Leader bridge disconnected before response arrived',
   'Request to extension timed out',
+  // A close() used to happen only at process exit, where nobody reads the
+  // error. Abdication closes a live leader, so these reach an agent now.
+  'Bridge is shutting down',
+  'MCP dispatch aborted',
+  'MCP dispatch interrupted',
 ];
 
 describe('bridge unreachable errors are typed', () => {
-  for (const file of ['extension-bridge.ts', 'remote-bridge.ts']) {
+  for (const file of ['extension-bridge.ts', 'remote-bridge.ts', 'electing-bridge.ts']) {
     it(`${file} throws no bare Error for an unreachable extension`, () => {
       const src = readFileSync(join(SRC, file), 'utf8');
       const lines = src.split('\n');

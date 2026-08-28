@@ -126,6 +126,12 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<void> {
   const idleMs = opts.idleMs ?? 30 * 60 * 1000;
 
   const bridge = await createBridge(wsPort);
+  // Name this process in the extension's client list. A daemon never runs
+  // MCP `initialize`, which is where an editor's identity comes from, so
+  // without this it held the port invisibly: the list showed every editor
+  // as a follower and nothing as the leader, and the first person to read
+  // it asked "so who is the leader?".
+  bridge.setOwnClientInfo({ name: 'customaise daemon', version: PKG_VERSION });
   // Off unless asked for. See the FileWatcher docstring: a resident daemon
   // writing scripts into the browser unattended, and spending a cap unit per
   // file save, is not a default anyone chose.
@@ -135,6 +141,8 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<void> {
     bridge,
     fileWatcher,
     resolvePushTarget: () => resolvePushTarget(activeWorkspaces),
+    // Named above, once. The CLI clients that pass through must not rename it.
+    reportClientIdentity: false,
   });
   const handler = createMcpHandler(factory);
 

@@ -178,6 +178,7 @@ If the user has Power User and has enabled Remote HITL Approvals on their Custom
 ### What MCP clients see
 
 - A prompt-gated `call_webmcp_tool` response may take up to 5 minutes. Surface a pending state to the end user rather than timing out aggressively.
+- While it waits, the server sends `notifications/progress` on any request that carried a `progressToken`, one per extension of the consent budget. A client that resets its request timeout on progress (the MCP SDK does, so does Claude Code) waits with the user. Claude Desktop and Cursor cap a tool call at a fixed 60 seconds at the time of writing and will report the call failed while the user can still approve it; the tool description tells the agent not to blindly re-issue a call with side effects when that happens.
 - If the user denies, `call_webmcp_tool` returns an error. The MCP server does not retry.
 - Tool-call arguments transit HTTPS in plaintext to our backend and land **KMS-encrypted at rest** in Firestore. Metadata (toolName, scriptName, origin) stays plaintext. See the Customaise [Privacy Policy](https://customaise.com/privacy).
 
@@ -401,6 +402,8 @@ customaise tools                             # WebMCP tools on that tab
 customaise call my_tool --args '{"q":"hi"}'
 customaise context page                      # DOM snapshot
 customaise shot -o ./page.png
+customaise tab list                          # every short verb has a noun-verb form: tab list|shot|use
+customaise schema                            # the whole command tree as JSON, for an agent to read
 customaise daemon status | stop
 ```
 
@@ -409,7 +412,7 @@ costs roughly half a second of package resolution per command against about
 fifty milliseconds installed. For anything in a loop, install it.
 
 **Output contract.** JSON on stdout, always, so it pipes. Diagnostics on
-stderr. `--pretty` indents the JSON. Exit codes are the interface:
+stderr. `--pretty` indents the JSON; `-h` or `--help` prints usage, and `customaise schema` prints the whole command tree as JSON for an agent to read. Exit codes are the interface:
 
 | Code | Meaning |
 |---|---|
@@ -446,8 +449,10 @@ When several customaise-mcp processes share a machine, the first to bind
 `:4050` leads and the rest relay through it, so one extension serves every
 IDE and every shell at once. That seam carries its own protocol version: a
 process built against different frames is refused rather than served, with an
-error naming both versions and which one to restart (`-32033`). Package
+error naming both versions and which one to restart (`-40033`). Package
 versions may differ freely; only a change to the frames themselves moves it.
+A leader that sees a follower from a newer package steps down and rejoins
+behind it, so a resident daemon can never pin the machine to an old version.
 
 ## Requirements
 
@@ -459,7 +464,7 @@ versions may differ freely; only a change to the frames themselves moves it.
 
 The MCP Bridge is free for any signed-in Customaise user. Free use is capped at **50 calls per UTC day** and **150 calls per rolling 7-day window**. **Power User** unlocks unlimited MCP. The cap covers every successful tool dispatch (built-in tools and WebMCP calls alike); failed calls and protocol-level traffic don't count.
 
-When the cap fires, the server returns a JSON-RPC error in the implementation-defined `-32029` slot with a human-readable message + structured `data` carrying scope, used/limit, and reset timestamp. IDEs that surface tool errors render the message verbatim. Sign-in is required regardless of tier; without a fresh Firebase ID token the server returns `-32028 MCP_AUTH_REQUIRED`.
+When the cap fires, the server returns a JSON-RPC error with code `-40029` and a human-readable message + structured `data` carrying scope, used/limit, and reset timestamp. IDEs that surface tool errors render the message verbatim. Sign-in is required regardless of tier; without a fresh Firebase ID token the server returns `-40028 MCP_AUTH_REQUIRED`. Branch on `structuredContent.error.type`, never on the number: the codes moved once already (3.2.0 took them out of the range the 2026-07-28 specification reserved for itself; the old `-3202x` values are still accepted from older extensions), the type strings did not.
 
 ## Troubleshooting
 

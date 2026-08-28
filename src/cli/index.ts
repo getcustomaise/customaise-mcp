@@ -54,12 +54,15 @@ const USAGE = `customaise ${PKG_VERSION}: drive the Customaise extension from a 
   customaise sync <dir>                   bulk-export your scripts to a directory
   customaise tabs                         open browser tabs
   customaise tab open <url> | focus <id>   close and reload take an optional id
+  customaise tab list | shot -o FILE | use --tab N
+                                          noun-verb forms of tabs / shot / use
   customaise context <page|console|selection> [--tab N]
                                           selection -o DIR writes .dom.md there
   customaise shot [--tab N] -o FILE       screenshot a tab
   customaise use --tab N                  remember a tab for later commands
   customaise daemon <status|stop>         inspect or stop the resident daemon
   customaise init [-o FILE]               write an agent primer (default AGENTS.md)
+  customaise schema                       the command tree as JSON, for agents
 
 Typical loop:
   customaise scripts install ./my-tool.agent.js
@@ -68,11 +71,53 @@ Typical loop:
 
   --pretty     indent the JSON (still stdout, still pipeable)
   --version    print the version
-  --help       this text
+  -h, --help   this text
 
 JSON on stdout, diagnostics on stderr. Exit: 0 ok, 2 usage, 3 unavailable,
 4 sign-in expired, 5 cap reached, 6 consent denied, 7 consent timed out,
 8 rejected by Customaise (see diagnostics).`;
+
+/**
+ * The command tree as data, for `customaise schema`.
+ *
+ * An agent discovers a CLI by asking it, not by reading a README it may
+ * never have been shown. `--help` is prose for a human; this is the same
+ * surface as JSON on stdout, with the MCP tool each verb reaches so an agent
+ * holding both doors can see they are one thing. Kept next to USAGE so the
+ * two are edited together; a test fails if a verb exists in one and not the
+ * other, or names a tool the server does not register.
+ */
+const COMMANDS: ReadonlyArray<{ command: string; description: string; tool?: string; flags?: string[] }> = [
+  { command: 'doctor', description: 'bridge, sign-in, tier, quota, gate; costs no quota', tool: 'get_bridge_status' },
+  { command: 'tools', description: 'WebMCP tools registered on a tab', tool: 'list_webmcp_tools', flags: ['--tab N'] },
+  { command: 'call <tool>', description: 'invoke a WebMCP tool; may wait for the user to approve', tool: 'call_webmcp_tool', flags: ['--args JSON', '--tab N'] },
+  { command: 'scripts list', description: 'installed scripts', tool: 'list_scripts' },
+  { command: 'scripts get <id>', description: 'write a script to a local file', tool: 'import_script', flags: ['-o FILE'] },
+  { command: 'scripts install FILE', description: 'push a local file into Customaise', tool: 'export_script', flags: ['--id ID'] },
+  { command: 'scripts enable <id>', description: 'turn a script on', tool: 'toggle_script' },
+  { command: 'scripts disable <id>', description: 'turn a script off', tool: 'toggle_script' },
+  { command: 'scripts fork <id>', description: 'fork a shared script into an editable copy', tool: 'import_script', flags: ['-o FILE'] },
+  { command: 'scripts rm <id>', description: 'delete a script', tool: 'delete_script' },
+  { command: 'sync <dir>', description: 'bulk-export your scripts to a directory', tool: 'sync_scripts' },
+  { command: 'tabs', description: 'open browser tabs', tool: 'list_tabs' },
+  { command: 'tab list', description: 'open browser tabs (same as tabs)', tool: 'list_tabs' },
+  { command: 'tab open <url>', description: 'open a tab', tool: 'open_tab' },
+  { command: 'tab focus <id>', description: 'bring a tab to the front', tool: 'focus_tab' },
+  { command: 'tab close [id]', description: 'close a tab (default: the remembered or active one)', tool: 'close_tab' },
+  { command: 'tab reload [id]', description: 'reload a tab, re-injecting scripts', tool: 'reload_tab' },
+  { command: 'tab shot', description: 'screenshot a tab (same as shot)', tool: 'take_screenshot', flags: ['-o FILE', '--tab N'] },
+  { command: 'tab use', description: 'remember a tab for later commands (same as use)', flags: ['--tab N'] },
+  { command: 'context page', description: 'DOM snapshot of a tab', tool: 'get_page_context', flags: ['--tab N'] },
+  { command: 'context console', description: 'console output of a tab', tool: 'get_console_context', flags: ['--tab N'] },
+  { command: 'context selection', description: 'elements the user selected visually', tool: 'get_selected_elements', flags: ['-o DIR'] },
+  { command: 'shot', description: 'screenshot a tab', tool: 'take_screenshot', flags: ['-o FILE', '--tab N'] },
+  { command: 'use', description: 'remember a tab for later commands; bare, print what is remembered', flags: ['--tab N'] },
+  { command: 'daemon status', description: 'is the resident daemon running' },
+  { command: 'daemon stop', description: 'stop the resident daemon' },
+  { command: 'init', description: 'write an agent primer (default AGENTS.md)', flags: ['-o FILE'] },
+  { command: 'schema', description: 'this command tree as JSON' },
+  { command: 'version', description: 'print the version' },
+];
 
 interface Flags { [k: string]: string | boolean }
 
@@ -99,6 +144,7 @@ function parseFlags(argv: string[]): { positional: string[]; flags: Flags } {
       flags[key] = true;
       continue;
     }
+    if (a === '-h') { flags.help = true; continue; }
     if (a === '-o') {
       const next = argv[++i];
       if (next === undefined) fail(EXIT.USAGE, '-o expects a file path.');
@@ -185,6 +231,20 @@ function present(result: any, passthrough = false): never {
   process.exit(EXIT.OK);
 }
 
+/** `use` is local state; it needs no daemon and no extension. */
+function handleUse(flags: Flags): never {
+  const raw = flags.tab;
+  if (raw === undefined || raw === true) {
+    emit({ ok: true, data: readState() });
+    process.exit(EXIT.OK);
+  }
+  const n = Number(raw);
+  if (!Number.isFinite(n)) fail(EXIT.USAGE, '--tab expects a number, got "' + raw + '"');
+  writeState({ ...readState(), tabId: n });
+  emit({ ok: true, data: { tabId: n } });
+  process.exit(EXIT.OK);
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const { positional, flags } = parseFlags(argv);
@@ -196,7 +256,6 @@ async function main(): Promise<void> {
 
   const [verb, sub, third] = positional;
 
-  // `use` is local state; it needs no daemon and no extension.
   if (verb === 'init') {
     // Deliberately before the daemon connect below: teaching an agent how to
     // use this should not require a browser, a sign-in, or a running daemon.
@@ -237,16 +296,29 @@ async function main(): Promise<void> {
     process.exit(EXIT.OK);
   }
 
-  if (verb === 'use') {
-    const raw = flags.tab;
-    if (raw === undefined || raw === true) {
-      emit({ ok: true, data: readState() });
-      process.exit(EXIT.OK);
-    }
-    const n = Number(raw);
-    if (!Number.isFinite(n)) fail(EXIT.USAGE, '--tab expects a number, got "' + raw + '"');
-    writeState({ ...readState(), tabId: n });
-    emit({ ok: true, data: { tabId: n } });
+  if (verb === 'use') handleUse(flags);
+
+  // Local, like `init`: the tree does not change with the browser's state.
+  if (verb === 'schema') {
+    emit({
+      ok: true,
+      data: {
+        version: PKG_VERSION,
+        output: 'JSON on stdout, diagnostics on stderr; --pretty indents',
+        commands: COMMANDS,
+        exitCodes: {
+          [EXIT.OK]: 'ok',
+          [EXIT.ERROR]: 'error',
+          [EXIT.USAGE]: 'usage: unknown verb, missing argument, bad JSON',
+          [EXIT.UNAVAILABLE]: 'daemon or extension not reachable; do not retry blindly',
+          [EXIT.AUTH]: 'signed out; retrying will not help',
+          [EXIT.CAP]: 'free-tier cap reached; stop and surface the upgrade path',
+          [EXIT.DENIED]: 'the user denied consent; do not retry',
+          [EXIT.TIMEOUT]: 'consent expired unanswered; may retry once, with the user told why',
+          [EXIT.REJECTED]: 'Customaise refused the input; the diagnostics say what to change',
+        },
+      },
+    });
     process.exit(EXIT.OK);
   }
 
@@ -396,6 +468,12 @@ async function main(): Promise<void> {
       // can see them. And each verb states its own contract: `focus` needs a
       // tab id and `close` does not, which a shared `args` expression cannot
       // express without getting one of them wrong.
+      if (sub === 'list') return present(await callTool('list_tabs', {}));
+      if (sub === 'use') handleUse(flags);
+      if (sub === 'shot') {
+        if (!flags.out) fail(EXIT.USAGE, 'customaise tab shot -o FILE [--tab N]');
+        return present(await callTool('take_screenshot', { tabId: tabOf(flags), filePath: abs(flags.out), output: 'file' }));
+      }
       if (sub === 'open') {
         if (!third) fail(EXIT.USAGE, 'customaise tab open <url>');
         return present(await callTool('open_tab', { url: third }));
@@ -412,7 +490,7 @@ async function main(): Promise<void> {
         return present(await callTool('reload_tab',
           third === undefined ? {} : { tabId: tabNumber(third) }));
       }
-      return fail(EXIT.USAGE, 'customaise tab <open|close|focus|reload> ...');
+      return fail(EXIT.USAGE, 'customaise tab <list|open|close|focus|reload|shot|use> ...');
     }
     case 'scripts': {
       if (sub === 'list') return present(await callTool('list_scripts', {}));

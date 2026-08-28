@@ -76,6 +76,8 @@ let extension: WebSocket;
 let nextAck: Ack = { success: true, result: [] };
 /** Every tool the extension was actually asked to run. One entry, one cap unit. */
 const dispatched: string[] = [];
+/** Every hello frame the daemon sent: its client list, as the sidebar sees it. */
+const hellos: Array<{ clients?: Array<{ name: string; version: string; role: string }> }> = [];
 /** The master-gate state the fake extension reports, as the real one does. */
 let systemStatus: Record<string, boolean> | null = null;
 const initSession: Record<string, unknown> = {
@@ -136,6 +138,7 @@ async function connectExtension(): Promise<void> {
 
   extension.on('message', (raw) => {
     const frame = JSON.parse(String(raw));
+    if (frame.role === 'hello') hellos.push(frame);
     if (frame.type === 'dispatch_tool') {
       dispatched.push(frame.tool);
       extension.send(JSON.stringify({
@@ -184,6 +187,21 @@ describe('CLI exit codes, end to end', () => {
     const { code, stdout } = await runCli(['tabs']);
     assert.equal(code, 0, stdout);
     assert.equal(JSON.parse(stdout).ok, true);
+  });
+
+  it('the daemon keeps its own name in the client list after serving a CLI call', async () => {
+    // The previous test ran a real `customaise` command through this daemon.
+    // The factory reports the first MCP client's identity as the process's
+    // own, which is right for a stdio server (it IS its IDE) and wrong here:
+    // the daemon named itself once, and the CLI that passed through must not
+    // rename it. Every hello since, including the latest, must still say so.
+    assert.ok(hellos.length > 0, 'the daemon never sent a hello frame');
+    const latest = hellos[hellos.length - 1];
+    const leader = (latest.clients ?? []).find((c) => c.role === 'leader');
+    assert.ok(leader, 'no leader row: the daemon is invisible in its own list');
+    assert.equal(leader!.name, 'customaise daemon');
+    assert.ok(!(latest.clients ?? []).some((c) => c.name === 'customaise-cli'),
+      'a passing CLI invocation must not appear as a resident client');
   });
 
   it('exits 4 when the extension says sign-in is required', async () => {

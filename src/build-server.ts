@@ -98,9 +98,20 @@ When a user asks you to interact with specific page elements:
 // inside that and short enough that a client restart picks up a release.
 const STATIC_LIST_TTL_MS = 60 * 60 * 1000;
 
+const CLIENT_INFO_META_KEY = 'io.modelcontextprotocol/clientInfo';
+
 export interface ServerFactoryDeps {
   bridge: Bridge;
   fileWatcher: FileWatcher;
+  /**
+   * Whether the first MCP client to identify itself becomes this process's
+   * identity in the extension's client list. True for a stdio server, which
+   * IS its IDE. False for the daemon, which has a fixed identity of its own
+   * and serves many short-lived CLI invocations: without this, the first
+   * `customaise` command renamed the resident process to `customaise-cli`
+   * for the rest of its life, one line after the daemon had named itself.
+   */
+  reportClientIdentity?: boolean;
   /** Where to write a one-line note when a client is first identified. */
   log?: (line: string) => void;
   /**
@@ -142,7 +153,7 @@ export function createServerFactory(deps: ServerFactoryDeps): () => McpServer {
    * Neither works in both, so both branches exist. Shipping only the modern
    * one would blank the sidebar for every client that has not moved.
    */
-  let clientInfoReported = false;
+  let clientInfoReported = deps.reportClientIdentity === false;
   const reportClientInfo = (info: unknown): void => {
     if (clientInfoReported) return;
     const candidate = info as { name?: unknown; version?: unknown } | null;
@@ -197,6 +208,30 @@ export function createServerFactory(deps: ServerFactoryDeps): () => McpServer {
     // dispatch layer can read this call's abort signal and close a consent
     // modal the caller has walked away from.
     installToolEnvelope(server, { onClientInfo: reportClientInfo });
+
+    // Identity from EVERY inbound request, not just tool calls.
+    //
+    // On 2026-07-28 there is no handshake; the client's name rides `_meta`
+    // on each request. The envelope above reads it, but only for tools/call,
+    // so a modern client that had listed tools and not yet called one was
+    // invisible in the extension's sidebar: Claude Desktop, freshly started,
+    // sends tools/list and resources/list and then waits for a human, and
+    // its row was simply absent. Both doors hand the server a transport
+    // through connect(), and the SDK installs its message handler on it
+    // there, so this is the one place every request passes on both eras.
+    const origConnect = server.connect.bind(server);
+    (server as { connect: (t: unknown) => Promise<void> }).connect = async (transport: unknown) => {
+      await origConnect(transport as Parameters<typeof origConnect>[0]);
+      const t = transport as { onmessage?: (message: unknown, extra?: unknown) => void };
+      const inner = t.onmessage;
+      t.onmessage = (message: unknown, extra?: unknown) => {
+        try {
+          const info = (message as { params?: { _meta?: Record<string, unknown> } })?.params?._meta?.[CLIENT_INFO_META_KEY];
+          if (info) reportClientInfo(info);
+        } catch { /* a label, never a reason to drop a request */ }
+        return inner?.(message, extra);
+      };
+    };
 
     // Register in NAME order, not source order.
     //

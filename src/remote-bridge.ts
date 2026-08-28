@@ -16,26 +16,21 @@
  *                        { role: 'status', extensionConnected }
  *
  * Failure modes:
- *   - Leader goes away: WS close fires and every in-flight request rejects
- *     with a clear error, then we reconnect to :port with a capped backoff
- *     until a leader answers again.
+ *   - Leader goes away: WS close fires, every in-flight request rejects
+ *     with a clear error, and `onLeaderLost` fires once. This class does
+ *     NOT reconnect or promote itself; `ElectingBridge` owns that, because
+ *     the right response to a lost leader is to re-race the port, and a
+ *     bind is not something a follower can do to itself. See
+ *     electing-bridge.ts for why an eager re-election is load-bearing.
  *
- *     That reconnect is the whole recovery story, and it exists because it
- *     did not. This comment used to claim that "subsequent request() calls
- *     attempt to promote self to leader", which was never implemented: there
- *     is no bind anywhere in this file, and there was no reconnect either.
- *     A follower whose leader died stayed dead. In practice that meant
- *     restarting your IDE bricked the resident CLI daemon until someone ran
- *     `customaise daemon stop`, with every command returning exit 3.
- *
- *     Reconnecting covers the case that actually happens: one leader
- *     replaces another and the extension reattaches to it. If NO leader ever
- *     comes back there is nothing to talk to anyway, and the daemon's idle
- *     guard eventually exits it; the next CLI invocation spawns a fresh
- *     process that elects properly through `createBridge`. Promotion in
- *     place would mean swapping this object for an ExtensionBridge while 23
- *     tool handlers hold a reference to it, which is a facade this does not
- *     need to buy that last case.
+ *     History, because it keeps repeating: this comment once claimed that
+ *     "subsequent request() calls attempt to promote self to leader", which
+ *     was never implemented. The fix for that added a reconnect loop here
+ *     and argued promotion was not needed because "if NO leader ever comes
+ *     back there is nothing to talk to anyway". That was wrong: the leader
+ *     that dies is often the ONLY other process, and a follower that only
+ *     dials leaves the port empty for the extension too. The facade the
+ *     comment declined to buy is exactly what `ElectingBridge` is.
  */
 
 import { WebSocket } from 'ws';
@@ -44,9 +39,11 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { ProtocolError } from "@modelcontextprotocol/server";
-import { ERROR_CODE_DISPATCH_TIMEOUT, ERROR_CODE_RELAY_PROTOCOL_MISMATCH } from './cap-state.js';
+import { ERROR_CODE_DISPATCH_TIMEOUT, ERROR_CODE_RELAY_PROTOCOL_MISMATCH, normalizeErrorCode } from './cap-state.js';
+import { currentRequestContext } from './request-context.js';
+import type { PendingDispatchInfo } from './request-context.js';
 import type { Bridge, BridgeClientInfo, BridgeSessionSnapshot, SystemStatusSnapshot, DispatchOptions } from './bridge.js';
-import { RELAY_PROTOCOL_VERSION } from './bridge.js';
+import { RELAY_PROTOCOL_VERSION, STEP_DOWN_CLOSE_CODE, STEP_DOWN_YIELD_MS } from './bridge.js';
 import { FOLLOWER_ORIGIN } from './extension-bridge.js';
 
 /**
@@ -68,6 +65,7 @@ interface PendingFollowerRequest {
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  onPending?: (info: PendingDispatchInfo) => void;
 }
 
 type LeaderFrame =
@@ -86,6 +84,16 @@ export class RemoteBridge implements Bridge {
   private pushHandler: ((type: string, data: any) => void) | null = null;
   private extensionConnected = false;
   private closed = false;
+  /**
+   * Whether a leader has ever greeted this connection.
+   *
+   * `close()` reads it to decide between a courteous WS close and a
+   * `terminate()`. A peer that never sent a status frame may never answer a
+   * close frame either, and `ws` holds a 30-second ref'd timer waiting for
+   * that answer — long enough to hold a whole process open. There is no
+   * session to close politely when none was ever established.
+   */
+  private established = false;
   private myClientInfo: BridgeClientInfo | null = null;
   private sessionSnapshot: BridgeSessionSnapshot | null = null;
   private _warnedLeaderSkew = false;
@@ -96,21 +104,15 @@ export class RemoteBridge implements Bridge {
    * built before the contract existed, which is the same situation), and by
    * an explicit 4001 eviction. Cleared on every fresh handshake, because the
    * mismatched leader dying and a compatible one winning the port is the
-   * normal recovery: reconnect keeps running at capped backoff, so this
+   * normal recovery: the election keeps running at capped backoff, so this
    * heals itself the moment the older process goes away.
    */
   private protocolMismatch: string | null = null;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private reconnectAttempts = 0;
-
-  /**
-   * Backoff for reattaching to a leader. Capped rather than unbounded: one
-   * WebSocket attempt every few seconds costs nothing, and an IDE that comes
-   * back four minutes later should be picked up without the daemon having
-   * given up on it.
-   */
-  private readonly RECONNECT_BASE_MS = 250;
-  private readonly RECONNECT_MAX_MS = 5000;
+  /** Set only by a 4001 close: the leader is ALIVE and refused us. */
+  private evictedReason: string | null = null;
+  /** How long to wait before re-electing, when told another process should bind first. */
+  private yieldMs = 0;
+  private leaderLostHandler: (() => void) | null = null;
 
   /**
    * Timeout (ms) for the initial status frame after WS open. If the
@@ -157,10 +159,13 @@ export class RemoteBridge implements Bridge {
       if (settled || handshakeComplete) return;
       settled = true;
       try { ws.close(1002, 'Handshake timeout'); } catch { /* ignore */ }
-      reject(new Error(
+      // ENOTLEADER: something answered but it is not one of ours. Waiting
+      // longer or re-racing the port cannot change that, so `createBridge`
+      // stops retrying on this one. See LEADER_RACE_RETRY_DELAYS_MS.
+      reject(Object.assign(new Error(
         `No leader handshake received within ${this.HANDSHAKE_TIMEOUT_MS}ms on :${this.port}. ` +
         `Another process may be holding the port but is not a customaise-mcp leader.`,
-      ));
+      ), { code: 'ENOTLEADER' }));
     }, this.HANDSHAKE_TIMEOUT_MS);
 
     ws.on('open', () => {
@@ -182,6 +187,7 @@ export class RemoteBridge implements Bridge {
         // arrival confirms we're talking to a real leader.
         if (!handshakeComplete && frame.role === 'status') {
           handshakeComplete = true;
+          this.established = true;
           clearTimeout(handshakeTimer);
           // Through the SAME handler the later frames use. Reading only
           // `extensionConnected` here is what made `doctor` report every
@@ -213,6 +219,13 @@ export class RemoteBridge implements Bridge {
       if (code === 4001) {
         this.protocolMismatch = reason.toString() ||
           ('The leader on :' + this.port + ' evicted this process over a relay protocol mismatch. Restart the older of the two.');
+        this.evictedReason = this.protocolMismatch;
+      }
+      // The leader stepped down for a newer process. If that process is not
+      // us, hold back so it wins the bind; see STEP_DOWN_YIELD_MS.
+      if (code === STEP_DOWN_CLOSE_CODE) {
+        const announced = reason.toString().match(/^stepping_down for (\S+?):/)?.[1] ?? null;
+        this.yieldMs = announced && announced !== OWN_VERSION ? STEP_DOWN_YIELD_MS : 0;
       }
       clearTimeout(handshakeTimer);
       this.ws = null;
@@ -221,17 +234,28 @@ export class RemoteBridge implements Bridge {
       // responses for them now.
       for (const [, pending] of this.pending) {
         clearTimeout(pending.timer);
-        pending.reject(new Error('Leader bridge disconnected before response arrived. Retry the request.'));
+        pending.reject(new ProtocolError(
+          ERROR_CODE_DISPATCH_TIMEOUT,
+          'Leader bridge disconnected before response arrived. Retry the request.',
+          { type: 'leader_unreachable' },
+        ));
       }
       this.pending.clear();
       if (!settled) {
         settled = true;
-        reject(new Error(`Could not connect to leader on :${this.port} — connection closed before handshake`));
+        // ELEADERGONE: the leader existed at bind time and was gone before it
+        // could greet us. Transient by construction — the port is now free,
+        // so `createBridge` re-races it rather than giving up.
+        reject(Object.assign(
+          new Error(`Could not connect to leader on :${this.port} — connection closed before handshake`),
+          { code: 'ELEADERGONE' },
+        ));
         return;
       }
-      // We were a working follower and the leader went away. Reattach:
-      // usually another process has already taken the port.
-      this._scheduleReconnect();
+      // We were a working follower and the leader went away. Whoever holds
+      // this bridge decides what happens next; a deliberate close() is not
+      // a lost leader.
+      if (!this.closed) this.leaderLostHandler?.();
     });
 
     ws.on('error', (err) => {
@@ -264,6 +288,12 @@ export class RemoteBridge implements Bridge {
         const pending = this.pending.get(frame.id);
         if (!pending) return;
         const extendMs = Math.max(frame.expectedTimeoutMs || 0, this.requestTimeoutMs);
+        // Same relay to the MCP client the leader does for its own calls.
+        try {
+          pending.onPending?.({ expectedTimeoutMs: extendMs, reason: frame.reason || 'awaiting_user_consent' });
+        } catch (err) {
+          this._log(`onPending threw: ${(err as Error).message}`);
+        }
         clearTimeout(pending.timer);
         pending.timer = setTimeout(() => {
           const stillPending = this.pending.get(frame.id);
@@ -400,6 +430,7 @@ export class RemoteBridge implements Bridge {
 
       this.pending.set(id, {
         resolve,
+        onPending: _opts.onPending ?? currentRequestContext().onPending,
         // Wrap reject so we can rehydrate ProtocolError from the leader's
         // JSON-encoded error string.
         reject: (err) => {
@@ -427,7 +458,8 @@ export class RemoteBridge implements Bridge {
       const parsed = JSON.parse(msg);
       if (!parsed || typeof parsed.message !== 'string') return err;
       if (typeof parsed.code === 'number') {
-        return new ProtocolError(parsed.code, parsed.message, parsed.data ?? undefined);
+        // A pre-3.2.0 leader relays the old reserved-band code.
+        return new ProtocolError(normalizeErrorCode(parsed.code), parsed.message, parsed.data ?? undefined);
       }
       // Codeless but typed: the extension's refusals carry `data.type` and no
       // number, on purpose. Rebuild a plain Error with the data attached so
@@ -479,55 +511,50 @@ export class RemoteBridge implements Bridge {
   }
 
   /**
-   * Reattach to whatever holds :port now, with a capped backoff.
-   *
-   * Never runs after a deliberate `close()`, and never stacks: a pending
-   * timer is left alone rather than replaced, so a burst of close events
-   * cannot turn into a burst of connection attempts.
+   * Called once when a connection that had completed its handshake closes
+   * for any reason other than our own `close()`. This class makes exactly
+   * one connection, so it fires at most once.
    */
-  private _scheduleReconnect(): void {
-    if (this.closed || this.reconnectTimer) return;
+  onLeaderLost(handler: () => void): void {
+    this.leaderLostHandler = handler;
+  }
 
-    const delay = Math.min(
-      this.RECONNECT_BASE_MS * 2 ** this.reconnectAttempts,
-      this.RECONNECT_MAX_MS,
-    );
-    this.reconnectAttempts++;
+  /**
+   * Why the leader refused us, if it did. Read by `ElectingBridge` after a
+   * loss: an eviction over the relay contract is not a transient the next
+   * election will cure, and a dispatch should say so at once rather than
+   * wait out an election that will only be evicted again.
+   *
+   * Deliberately NOT `protocolMismatch`, which a pre-contract leader's
+   * status frame also sets. That leader is now gone (this is read after a
+   * loss), so its verdict is stale and the election may well bind. Only a
+   * 4001 close says the incompatible process is still holding the port.
+   */
+  get evictionReason(): string | null {
+    return this.evictedReason;
+  }
 
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      if (this.closed) return;
-      this._connect(
-        () => {
-          this.reconnectAttempts = 0;
-          this._log(`Reattached to leader on :${this.port}`);
-          // The status frame that resolves this also re-sends our client
-          // info, so the extension's connected-IDE list repopulates without
-          // anything here having to remember to do it.
-        },
-        (err) => {
-          this._log(`Reattach failed: ${err.message}`);
-          this._scheduleReconnect();
-        },
-      );
-    }, delay);
-    // Do not hold the process open purely to retry a connection.
-    this.reconnectTimer.unref?.();
+  /** Read by `ElectingBridge.recover` after a loss; 0 means race at once. */
+  get reelectionDelayMs(): number {
+    return this.yieldMs;
   }
 
   async close(): Promise<void> {
     this.closed = true;
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
     for (const [, pending] of this.pending) {
       clearTimeout(pending.timer);
-      pending.reject(new Error('Bridge is shutting down'));
+      pending.reject(new ProtocolError(
+        ERROR_CODE_DISPATCH_TIMEOUT,
+        'Bridge is shutting down.',
+        { type: 'dispatch_timeout', reason: 'shutting_down' },
+      ));
     }
     this.pending.clear();
     if (this.ws) {
-      try { this.ws.close(1000, 'Follower shutting down'); } catch { /* ignore */ }
+      try {
+        if (this.established) this.ws.close(1000, 'Follower shutting down');
+        else this.ws.terminate();
+      } catch { /* ignore */ }
       this.ws = null;
     }
   }
