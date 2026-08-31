@@ -56,6 +56,14 @@ export interface DaemonRecord {
   port: number;
   pid: number;
   version: string;
+  /**
+   * The WebSocket port the EXTENSION dials, as this daemon actually resolved
+   * it — which is not necessarily what a later CLI's environment says.
+   * `doctor` prints it beside `port`, and printing the caller's own guess
+   * instead would be a diagnostic that agrees with whoever is asking rather
+   * than with the process being asked about. Absent on an older daemon's record.
+   */
+  wsPort?: number;
 }
 
 export function readDaemonRecord(): DaemonRecord | null {
@@ -242,7 +250,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<void> {
     server.listen(port, '127.0.0.1', resolve);
   });
 
-  writeDaemonRecord({ token, port, pid: process.pid, version: PKG_VERSION });
+  writeDaemonRecord({ token, port, pid: process.pid, version: PKG_VERSION, wsPort });
   process.stderr.write(
     '[customaise-daemon] ' + PKG_VERSION + ' listening on 127.0.0.1:' + port +
     ' (bridge role=' + bridge.role + ')\n'

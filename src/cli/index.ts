@@ -62,6 +62,8 @@ const USAGE = `customaise ${PKG_VERSION}: drive the Customaise extension from a 
   customaise use --tab N                  remember a tab for later commands
   customaise daemon <status|stop>         inspect or stop the resident daemon
   customaise init [-o FILE]               write an agent primer (default AGENTS.md)
+  customaise resources                    documents the server publishes
+  customaise resource <name|uri>          read one, e.g. agentscript-conventions
   customaise schema                       the command tree as JSON, for agents
 
 Typical loop:
@@ -115,6 +117,8 @@ const COMMANDS: ReadonlyArray<{ command: string; description: string; tool?: str
   { command: 'daemon status', description: 'is the resident daemon running' },
   { command: 'daemon stop', description: 'stop the resident daemon' },
   { command: 'init', description: 'write an agent primer (default AGENTS.md)', flags: ['-o FILE'] },
+  { command: 'resources', description: 'documents the server publishes, including how to build scripts' },
+  { command: 'resource', description: 'read one resource by name or customaise:// uri' },
   { command: 'schema', description: 'this command tree as JSON' },
   { command: 'version', description: 'print the version' },
 ];
@@ -397,7 +401,7 @@ async function main(): Promise<void> {
   const callToolWithConsentBudget = async (name: string, args: Record<string, unknown>) => {
     const note = setTimeout(() => {
       process.stderr.write(
-        'customaise: still waiting. If this tool needs consent, a prompt is open in your browser (up to 5 minutes).\n',
+        'customaise: still waiting. If this tool needs consent, an approval card is open on the page in the browser; with Remote Approvals on, it can also be answered from the account page or a phone (up to 5 minutes).\n',
       );
     }, 10_000);
     try {
@@ -405,6 +409,28 @@ async function main(): Promise<void> {
     } finally {
       clearTimeout(note);
     }
+  };
+
+  /**
+   * The JSON carries `__consent` for a call a person decided; this is the
+   * same fact for a reader of the terminal, on stderr so stdout stays the
+   * result. "Always allow" changes every later call of this tool, which is
+   * worth a sentence at the moment it happens. Returns its input so the
+   * call site stays one expression (the rejection test reads that line).
+   */
+  const noteConsent = <T,>(r: T): T => {
+    const sc = (r as any)?.structuredContent;
+    const consent = sc?.__consent ?? sc?.result?.__consent;
+    if (consent && consent.gated) {
+      const where = consent.decidedBy === 'remote' ? 'from another device'
+        : consent.decidedBy === 'local' ? 'on the page in the browser'
+        : 'by ' + String(consent.decidedBy ?? 'an unknown surface');
+      const persisted = consent.persisted === 'allow'
+        ? ' "Always allow" was chosen: this tool will not prompt again on this browser.'
+        : '';
+      process.stderr.write('customaise: a person approved this call ' + where + '.' + persisted + '\n');
+    }
+    return r;
   };
 
   const abs = (p: unknown) => resolvePath(String(p));
@@ -438,7 +464,19 @@ async function main(): Promise<void> {
         // on a mixed fleet, this line is the diagnosis.
         leader: known(s.leaderVersion),
         node: process.versions.node,
+        // Two ports, and an agent that sees only one of them reads the other
+        // as a misconfiguration: the first Grok Bot run compared this line to
+        // the extension's "waiting for localhost:4050" and went looking for a
+        // fault that did not exist. `endpoint` is where THIS CLI talks to the
+        // daemon; `extensionSocket` is where the extension dials the daemon.
+        // They are meant to differ.
         endpoint: '127.0.0.1:' + record.port,
+        // From the DAEMON's record, not this process's environment: the two can
+        // differ (a daemon started with a different CUSTOMAISE_WS_PORT), and a
+        // diagnostic that reports the caller's guess agrees with whoever is
+        // asking rather than with the process being asked about. Falls back to
+        // this environment only for a record an older daemon wrote.
+        extensionSocket: 'ws://127.0.0.1:' + (record.wsPort ?? (Number(process.env.CUSTOMAISE_WS_PORT) || 4050)),
         extension: reachable
           ? 'connected'
           : (r?.structuredContent?.error?.type ?? (s.extensionConnected === false ? 'extension_not_connected' : 'unreachable')),
@@ -459,7 +497,35 @@ async function main(): Promise<void> {
     case 'tools':   return present(await callTool('list_webmcp_tools', { tabId: tabOf(flags) }));
     case 'call': {
       if (!sub) fail(EXIT.USAGE, 'customaise call <tool> [--args JSON] [--tab N]');
-      return present(await callToolWithConsentBudget('call_webmcp_tool', { toolName: sub, toolArgs: parseArgs(flags), tabId: tabOf(flags) }), true);
+      return present(noteConsent(await callToolWithConsentBudget('call_webmcp_tool', { toolName: sub, toolArgs: parseArgs(flags), tabId: tabOf(flags) })), true);
+    }
+    /*
+     * Resources, not tools. The server publishes four, and two of them are the
+     * only documents that say how to build a UserScript or an AgentScript.
+     * Without a verb to reach them an agent with a shell can install scripts
+     * and never learn how to write one, which bites hardest exactly where the
+     * CLI is the only way in: a cloud agent VM cannot attach a local MCP
+     * server at all.
+     *
+     * Missed because the ARD reasoned parity at the transport ("the CLI is a
+     * client of the protocol, not of the transport, which is what keeps a
+     * single definition of every tool") and then enumerated the command
+     * surface from the TOOL list. The daemon was serving these the whole time.
+     */
+    case 'resources': return emit({ ok: true, resources: (await client.listResources()).resources });
+    case 'resource': {
+      if (!sub) fail(EXIT.USAGE, 'customaise resource <name|uri>   e.g. agentscript-conventions');
+      // Bare names are accepted because that is what an agent reading the
+      // list will type; the uri form still works verbatim.
+      const uri = sub.includes('://') ? sub : `customaise://${sub}`;
+      let read;
+      try {
+        read = await client.readResource({ uri });
+      } catch (err: any) {
+        fail(EXIT.USAGE,
+          `No resource ${uri}. Run \`customaise resources\` to list them.`);
+      }
+      return emit({ ok: true, uri, contents: read.contents });
     }
     case 'tabs':    return present(await callTool('list_tabs', {}));
     case 'tab': {

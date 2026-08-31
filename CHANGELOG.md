@@ -2,6 +2,18 @@
 
 All notable changes to `@customaise/mcp` will be documented in this file.
 
+## [3.2.1] - 2026-08-31
+
+### Added
+
+- **`customaise resources` and `customaise resource <name|uri>`.** The server publishes four resources and two of them are the only documents that say how to build a UserScript or an AgentScript. An MCP client gets them from `resources/list` for free; the CLI had no verb that reached any of them, so an agent with only a shell could install scripts and never learn how to write one. That bit hardest where the CLI is the only option, since a cloud agent VM cannot attach a local MCP server at all. A bare name is accepted (`customaise resource agentscript-conventions`) because that is what an agent reading the list will type, and the primer `customaise init` writes now points at them.
+
+### Fixed
+
+- **`doctor` reported the port it assumed, not the one the daemon is on.** The CLI read the WebSocket port from an environment fallback rather than from the daemon's own record, so it could report 4050 while the daemon listened elsewhere. That made a local verification of the bridge meaningless: it confirmed the default, not the daemon. It reads the record now.
+
+- **A failed share says why.** Sharing a script that the server refused left the row silent, with the reason discarded. The error text is surfaced instead.
+
 ## [3.2.0] - 2026-08-28
 
 ### Added
