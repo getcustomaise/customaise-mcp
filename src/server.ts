@@ -1614,13 +1614,13 @@ AgentScripts inject WebMCP tools onto any web page via \`navigator.modelContext\
 
 ## Setup & environment
 
-**No Chrome flag required.** Customaise ships a polyfill of \`navigator.modelContext\` that runs on stable Chromium today. The Chrome \`#enable-webmcp-testing\` flag is OPTIONAL — it only matters if the user wants third-party WebMCP-spec inspector tools to introspect Customaise's tool registry. The Customaise stack itself (the in-extension AI, the IDE MCP bridge, every \`@webmcp\`-declared tool) works flag-off.
+**No Chrome flag required.** Customaise ships a polyfill of \`navigator.modelContext\` that runs on stable Chromium today. The Chrome \`#enable-webmcp-testing\` flag is OPTIONAL — it only matters if the user wants third-party WebMCP-spec inspector tools to introspect Customaise's tool registry. The Customaise stack itself (the in-extension AI, the Agent Bridge, every \`@webmcp\`-declared tool) works flag-off.
 
-**The "two browsers" mental model.** Customaise is intentionally split across two browsers:
-- **The user's daily Chrome** (or Edge / Brave / any Chromium) — where Customaise is installed, where the user is logged into the target sites (bank, CRM, internal Jira, etc.), where AgentScripts inject. This is where the "hands" live.
-- **The IDE running the agent** (Cursor, Claude Code, Windsurf, etc.) — where the agent's "brain" lives. The IDE's built-in browser is NOT where Customaise should run.
+**The "two sides" mental model.** Customaise is split across two sides, and they are rarely on the same machine:
+- **The hands: the user's daily Chrome** (or Edge / Brave / any Chromium). Where Customaise is installed, where the user is signed in to the target sites (bank, CRM, internal Jira, etc.), and where AgentScripts inject.
+- **The brain: wherever you happen to be running.** An editor with an MCP client (Cursor, Claude Code, Windsurf, etc.), or a bare shell with no MCP client at all, reaching the same control surface through the \`customaise\` CLI. It makes no difference to the script you write. If you are inside an editor, its built-in browser is NOT where Customaise should run.
 
-The two communicate via a WebSocket on \`localhost:4050\` (the Customaise MCP server, spawned by the IDE's MCP client). The agent never sees the user's cookies or auth tokens — it just calls registered tools and the tools execute inside the user's authenticated session. This split is what unlocks "Bring Your Own Session" automation: any web app the user is already logged into becomes addressable, with no API keys, no OAuth dance, no scraping.
+The two sides meet over a WebSocket on \`localhost:4050\`, served by the Customaise daemon. An MCP client spawns that daemon for you; from a shell, your first \`customaise\` command spawns it. Either way, the agent never sees the user's cookies or auth tokens: it calls registered tools, and the tools execute inside the user's already-authenticated session. This split is what unlocks "Bring Your Own Session" automation: any web app the user is already logged into becomes addressable, with no API keys, no OAuth dance, no scraping.
 
 **Prerequisites for the user (one-time).** They need:
 1. Customaise extension installed (Web Store or unpacked).
@@ -1630,7 +1630,7 @@ The two communicate via a WebSocket on \`localhost:4050\` (the Customaise MCP se
 
 ## Format Requirements
 1. MUST use the \`// ==AgentScript==\` metadata block (NOT UserScript).
-2. MUST declare each tool via \`// @webmcp <toolName> <permission>\` (permissions: allow, prompt, deny). Undeclared tools are denied by default. **Prefer \`prompt\`**: in a script you wrote as an agent, a self-declared \`allow\` resolves as \`prompt\` anyway, so declaring \`allow\` buys nothing and reads as though it did. The gate keys on who wrote the script, not on what the script asks for: a script installed through the MCP bridge or the CLI cannot grant itself an ungated tool, and \`export_script\` returns a \`WEBMCP_ALLOW_DOWNGRADED\` warning when you try. The user makes it permanent by choosing "Always allow" on the first prompt.
+2. MUST declare each tool via \`// @webmcp <toolName> <permission>\` (permissions: allow, prompt, deny). Undeclared tools are denied by default. **Prefer \`prompt\`**: in a script you wrote as an agent, a self-declared \`allow\` resolves as \`prompt\` anyway, so declaring \`allow\` buys nothing and reads as though it did. The gate keys on who wrote the script, not on what the script asks for: a script installed through the Agent Bridge, over MCP or from a shell, cannot grant itself an ungated tool, and \`export_script\` returns a \`WEBMCP_ALLOW_DOWNGRADED\` warning when you try. The user makes it permanent by choosing "Always allow" on the first prompt.
 3. Top-level \`navigator.modelContext.registerTool()\` is **strongly recommended** (NOT enforced — IIFE-wrapped scripts also work). The reason: Customaise's in-browser AI editor performs **symbol-level edits** (function-by-function) only on functions that are addressable at the top level or inside a clearly-named IIFE structure with named functions. Flat anonymous code or deeply-nested anonymous arrows force the editor to fall back to **whole-script rewrite**, which is slower, more error-prone, and loses git-friendly diffs. If symbol-editability matters (it usually does for long-lived scripts), structure your code as named top-level functions referenced by your \`registerTool\` calls.
 
 \`\`\`javascript
@@ -1639,7 +1639,7 @@ The two communicate via a WebSocket on \`localhost:4050\` (the Customaise MCP se
 // @namespace    https://customaise.com
 // @version      1.0.0
 // @match        https://github.com/*
-// @description  Exposes GitHub issues data to IDE agents via WebMCP tools
+// @description  Exposes GitHub issues data to AI agents via WebMCP tools
 // @webmcp       list_open_issues prompt
 // @grant        GM_log
 // @grant        GM_setValue

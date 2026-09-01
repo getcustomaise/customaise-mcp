@@ -2,6 +2,12 @@
 
 All notable changes to `@customaise/mcp` will be documented in this file.
 
+## [3.2.2] - 2026-09-01
+
+### Fixed
+
+- **The AgentScript conventions no longer assume the reader is in an editor.** The document described a "two browsers" model whose second browser was an IDE, told the reader the daemon was "spawned by the IDE's MCP client", and offered its sample script to "IDE agents". None of that is true for an agent holding only a shell, which is precisely the reader 3.2.1 gave these documents to. The model is now two sides, brain and hands, with the brain in an editor or a bare shell and no difference to the script you write. The primer `customaise init` writes stops contrasting its reader with "an IDE agent" for the same reason.
+
 ## [3.2.1] - 2026-08-31
 
 ### Added

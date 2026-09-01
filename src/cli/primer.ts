@@ -49,7 +49,7 @@ not in the port.
 ### Before you write a script
 
 Customaise has two kinds and they are built differently. Read the one you need
-before writing anything; this is the same text an IDE agent gets over MCP.
+before writing anything; this is the same text an MCP client gets.
 
 \`\`\`sh
 customaise resources                              # what is published
