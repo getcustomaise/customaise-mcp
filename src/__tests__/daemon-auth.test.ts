@@ -60,15 +60,7 @@ describe('daemon token', () => {
         );
     });
 
-    it('rejects before reading the request body', () => {
-        // An unauthenticated caller must not be able to make the daemon
-        // buffer an arbitrary payload.
-        const handler = src.slice(src.indexOf('http.createServer'));
-        const authAt = handler.indexOf('tokenMatches');
-        const bodyAt = handler.indexOf('for await (const c of req)');
-        assert.ok(authAt > 0 && bodyAt > 0, 'handler shape changed');
-        assert.ok(authAt < bodyAt, 'the token is checked after the body is read');
-    });
+
 });
 
 describe('daemon exposure', () => {

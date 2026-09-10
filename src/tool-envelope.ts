@@ -113,7 +113,9 @@ export function toStructuredError(err: unknown): StructuredToolError {
   return {
     isError: true,
     structuredContent: { error: { ...data, type, ...(code !== undefined ? { code } : {}), message } },
-    content: [{ type: 'text', text: message }],
+    content: [{ type: 'text', text: message + (typeof data.recovery === 'string'
+      ? '\n' + JSON.stringify({ scriptId: data.scriptId, operationId: data.operationId, outcome: data.outcome, recovery: data.recovery })
+      : '') }],
   };
 }
 
@@ -156,7 +158,9 @@ export function installToolEnvelope(
                 params: {
                   progressToken,
                   progress: ++ticks,
-                  message: `Waiting for the user to approve in Customaise (${info.reason}); the bridge will wait up to ${seconds}s more.`,
+                  message: info.reason.startsWith('script_save:')
+                    ? `Customaise ${info.reason}; save deadline in up to ${seconds}s.`
+                    : `Waiting for the user to approve in Customaise (${info.reason}); the bridge will wait up to ${seconds}s more.`,
                 },
               })).catch(() => { /* a progress frame the client dropped is not an error */ });
             } catch { /* same */ }

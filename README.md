@@ -161,6 +161,32 @@ Five resources any connected agent can read via `resources/read`. The two conven
 | `customaise://userscript-conventions` | Full UserScript reference: file structure, IIFE pattern, `GM_*` APIs, symbol-level editing, `@match` and `@namespace` rules |
 | `customaise://agentscript-conventions` | Full AgentScript reference: the `// ==AgentScript==` block, `// @webmcp <tool> <permission>` declarations, `navigator.modelContext.registerTool()`, consent model |
 
+## Save deadlines and recovery (extension 1.3.4 / MCP 3.2.3)
+
+`export_script` reports an operation ID and stages such as normalization,
+Monaco queue/setup, resources and persistence. The extension bounds the whole
+save to 90 seconds, including waiting for the offscreen document. Cancellation
+and transport timeouts propagate through both leader and follower processes.
+Work cancelled before persistence cannot later publish. Concurrent preparations
+and storage revisions are checked again at the commit boundary.
+
+After a timeout, use `get_bridge_status({ scriptId, operationId })`, with the
+IDs from the error, or `customaise doctor --script ID --operation ID`. This
+authenticated read costs no quota, including when the normal quota is exhausted.
+`committed` means there is a retained commit receipt; `matchesCurrentCode` says
+whether that version remains current. `not_committed` identifies a known attempt
+that has not written. `unknown` means there is insufficient retained proof:
+inspect the current script before retrying. A submitted Chrome storage write
+cannot be recalled. Its receipt is stored with the script and survives a browser
+restart. Only the latest receipt per script is durable; recent operation stages
+are retained in memory for up to 15 minutes (128 entries, 32 running saves).
+
+For edits, pass the `codeHash` returned by `import_script` as
+`export_script.expectedCodeHash` to reject a save based on an outdated import.
+Update all MCP processes together: internal leader/follower relay protocol 2
+adds cancellation ownership. The extension wire protocol and 19-tool count are
+unchanged; the full save contract requires extension 1.3.4.
+
 ## WebMCP Tool Calls & Consent (HITL)
 
 AgentScripts register tools on web pages via `navigator.modelContext.registerTool(...)`. Each tool is declared in the AgentScript's `// @webmcp <toolName> <permission>` header with one of three permissions:
@@ -280,6 +306,7 @@ Once `sync_scripts` has been called, the MCP server watches the directory for `.
 | `CUSTOMAISE_MCP_ALLOW_INSECURE` | _(unset)_ | Set to `1` to disable the origin allowlist. **Tests only.** Emits a loud warning at startup |
 | `CUSTOMAISE_WORKSPACE` | _(cwd)_ | Absolute path where `.customaise/` files should be written. Useful for IDEs that don't set cwd to the project root (Claude Desktop, Antigravity) |
 | `CUSTOMAISE_CONFIG_DIR` | `~/.config/customaise` | Where the CLI keeps its daemon connection file and remembered tab. Delete this directory to remove everything the CLI stores; uninstalling the extension does not, because these live outside the browser profile |
+| `CUSTOMAISE_CLI_SCOPE` | _(empty)_ | Optional Bot/session name separating remembered tabs within the same working directory. Remembered tabs are always scoped to the working directory; this adds isolation for Bots sharing one directory |
 | `CUSTOMAISE_HTTP_PORT` | `4051` | Loopback port the daemon serves the CLI on. Distinct from `CUSTOMAISE_WS_PORT`, which is the extension's WebSocket bridge |
 | `CUSTOMAISE_MCP_OUTPUT` | `file` | Where `get_page_context`, `get_console_context` and `take_screenshot` put their full payload when the call does not say. `file` writes to disk and returns a summary plus the path; `inline` writes nothing and returns the whole payload (for the screenshot, the image itself) in the response. Set this to `inline` for a client with no filesystem tool. See [Chat clients and file-less agents](#chat-clients-and-file-less-agents) |
 | `CUSTOMAISE_MCP_INLINE_MAX_KB` | `64` | Ceiling on an inline JSON payload. Over it, lists are shortened (never the JSON itself, so it still parses) and the response reports exactly what was dropped |
@@ -369,7 +396,7 @@ The MCP server listens on `ws://localhost:4050` in plaintext on your loopback in
 
 **Defense in depth**: every `prompt`-permissioned tool still requires your explicit approval in the Customaise consent modal before running.
 
-Tools declared `allow` run without asking, with one exception that matters here: **a script written through this bridge or the `customaise` CLI does not get to grant itself `allow`.** Its self-declared `allow` resolves as `prompt`, so the first call shows you what the agent built. Choosing "Always allow" stores an override and it never prompts again. An agent that could clear its own gate would not be gated, and the whole point of the consent modal is that it lives somewhere the calling agent cannot reach.
+Tools declared `allow` run without asking, with one exception that matters here: **a script written through this bridge or the `customaise` CLI does not get to grant itself `allow`.** Its self-declared `allow` resolves as `prompt`, so the first call shows you what the agent built. Choosing "Always allow" stores an override and it never prompts again. The MCP tool API cannot resolve the consent modal. Remote approvals route prompts away from the requesting browser, but the backend authenticates the signed-in account and accepts a client-supplied device claim; this is not proof of a separate human or physical device. An agent with account credentials or full OS access needs independent account/OS access restrictions.
 
 Scripts you wrote yourself, and scripts you subscribed to from the marketplace, are unaffected: `allow` means `allow`. For marketplace scripts that means the old advice still holds, so only subscribe to AgentScripts from sources you trust.
 
@@ -406,6 +433,14 @@ customaise tab list                          # every short verb has a noun-verb 
 customaise schema                            # the whole command tree as JSON, for an agent to read
 customaise daemon status | stop
 ```
+
+`customaise use --tab N` remembers the tab for the current working directory.
+Bots sharing a directory can set distinct `CUSTOMAISE_CLI_SCOPE` values before
+both `use` and later commands. Scheduled routines should pass `--tab N` explicitly
+and verify the tab URL each run, since the browser itself remains shared and a
+tab can close or navigate. This scoping does not isolate browser logins or files.
+After upgrading from the former global remembered-tab file, select the tab once
+in each workspace; the global choice is not copied into every Bot's workspace.
 
 Without a global install, `npx -p @customaise/mcp customaise <verb>` works but
 costs roughly half a second of package resolution per command against about
@@ -453,6 +488,40 @@ error naming both versions and which one to restart (`-40033`). Package
 versions may differ freely; only a change to the frames themselves moves it.
 A leader that sees a follower from a newer package steps down and rejoins
 behind it, so a resident daemon can never pin the machine to an old version.
+
+### Custom HTTP clients: workspace and resource limits
+
+The loopback daemon requires `x-customaise-token` and an absolute
+`x-customaise-workspace` on **every** HTTP request, including negotiation.
+The CLI supplies these automatically. A missing, relative or malformed workspace
+returns HTTP 400 before dispatch; requests never inherit another caller's directory.
+An explicitly declared filesystem root is honored, with ordinary filesystem
+permissions still applying. This header chooses the output directory; it is not
+an OS sandbox for clients that share the same daemon token.
+
+For Unicode paths, send `encodeURIComponent(absolutePath)` as the workspace and
+`x-customaise-workspace-encoding: uri`. The daemon decodes once; raw headers without
+that encoding retain literal percent signs. New daemons advertise
+`workspaceEncoding: "uri"` in `daemon.json`. The CLI uses that capability and asks
+you to stop an older daemon before using a path it cannot represent safely.
+
+The daemon admits at most 16 concurrent HTTP requests and remembers up to 256
+workspaces active in the last 15 minutes. New requests above either limit receive
+HTTP 429 before tool dispatch. Uploads are limited to 8 MiB and 30 seconds;
+responses to 32 MiB cumulatively and requests to 10 minutes, including streamed
+output. These transport limits do not raise the smaller limits of individual
+tools. At most 64 TCP connections are accepted, with a 15-second header timeout.
+SSE progress streams immediately, and slow readers apply backpressure instead of
+causing the daemon to buffer the entire response.
+
+An oversized upload receives HTTP 413; a stalled upload receives HTTP 408.
+Pre-dispatch errors include `outcome: "not_dispatched"`. Once a tool has been
+submitted, a response failure or disconnect may leave its outcome unknown: check
+what happened before retrying a mutating tool. If a response exceeds its limit
+after streaming starts, the transport closes with an error rather than returning
+a truncated success. Disconnects and the request deadline propagate cancellation;
+a handler that ignores cancellation retains its admission slot until it settles,
+so a stream of replacements cannot create unbounded background work.
 
 ## Requirements
 

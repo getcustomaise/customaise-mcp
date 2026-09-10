@@ -49,6 +49,8 @@ describe('usage errors exit 2 and say what is wrong', () => {
     ['an unknown verb', ['nonsense'], /unknown command/],
     ['an unknown subcommand', ['context', 'nonsense'], /context <page\|console\|selection>/],
     ['a non-numeric tab id', ['tab', 'focus', 'abc'], /tab id must be a number/],
+    ['a negative remembered tab id', ['use', '--tab', '-1'], /non-negative integer/],
+    ['a fractional remembered tab id', ['use', '--tab', '1.5'], /non-negative integer/],
   ];
 
   for (const [name, args, expected] of cases) {

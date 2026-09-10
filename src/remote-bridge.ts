@@ -66,6 +66,7 @@ interface PendingFollowerRequest {
   reject: (reason: Error) => void;
   timer: ReturnType<typeof setTimeout>;
   onPending?: (info: PendingDispatchInfo) => void;
+  cancel?: () => void;
 }
 
 type LeaderFrame =
@@ -298,6 +299,7 @@ export class RemoteBridge implements Bridge {
         pending.timer = setTimeout(() => {
           const stillPending = this.pending.get(frame.id);
           if (!stillPending) return;
+          if (stillPending.cancel) { stillPending.cancel(); return; }
           this.pending.delete(frame.id);
           // See the leader's matching branch: our timer firing is a
           // dispatch timeout, not evidence of what the user chose.
@@ -388,11 +390,6 @@ export class RemoteBridge implements Bridge {
     args: Record<string, unknown> = {},
     _opts: DispatchOptions = {},
   ): Promise<unknown> {
-    // Cancellation is not forwarded across the follower channel yet: the
-    // leader owns the dispatch and the peer protocol has no cancel frame.
-    // A follower that aborts still stops waiting; the modal closes on its
-    // own five-minute budget. Named rather than silent so the gap is
-    // visible when the peer protocol next changes.
     if (this.closed) {
       throw new Error('Bridge is closed');
     }
@@ -423,25 +420,29 @@ export class RemoteBridge implements Bridge {
     const id = randomUUID();
 
     return new Promise<unknown>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const signal = _opts.signal ?? currentRequestContext().signal;
+      const cancel = () => {
+        const pending = this.pending.get(id);
+        if (!pending) return;
         this.pending.delete(id);
-        reject(new Error(`Dispatch to extension timed out after ${this.requestTimeoutMs}ms (tool=${tool}, id=${id})`));
-      }, this.requestTimeoutMs);
-
+        clearTimeout(pending.timer);
+        try { this.ws?.send(JSON.stringify({ role: 'req-cancel', id })); } catch { /* disconnected */ }
+        pending.reject(new ProtocolError(ERROR_CODE_DISPATCH_TIMEOUT,
+          `Dispatch ${signal?.aborted ? 'cancelled' : 'timed out'} (tool=${tool}); check the outcome before retrying a write.`,
+          { type: signal?.aborted ? 'dispatch_cancelled' : 'dispatch_timeout', outcome: 'unknown', tool,
+            ...(tool === 'export_script' ? { scriptId: args.scriptId, operationId: args.saveOperationId } : {}) }));
+      };
+      const timer = setTimeout(cancel, this.requestTimeoutMs);
       this.pending.set(id, {
-        resolve,
+        resolve: value => { signal?.removeEventListener('abort', cancel); resolve(value); },
+        reject: error => { signal?.removeEventListener('abort', cancel); reject(this._maybeRehydrateProtocolError(error)); },
         onPending: _opts.onPending ?? currentRequestContext().onPending,
-        // Wrap reject so we can rehydrate ProtocolError from the leader's
-        // JSON-encoded error string.
-        reject: (err) => {
-          const rehydrated = this._maybeRehydrateProtocolError(err);
-          reject(rehydrated);
-        },
-        timer,
+        timer, cancel
       });
-
-      const frame = { role: 'req-dispatch' as const, id, tool, args };
-      this.ws!.send(JSON.stringify(frame));
+      if (signal?.aborted) { cancel(); return; }
+      signal?.addEventListener('abort', cancel, { once: true });
+      try { this.ws!.send(JSON.stringify({ role: 'req-dispatch', id, tool, args })); }
+      catch (error) { this.pending.delete(id); clearTimeout(timer); signal?.removeEventListener('abort', cancel); reject(error); }
     });
   }
 
@@ -589,15 +590,16 @@ export class RemoteBridge implements Bridge {
     // Version skew between this process and the one holding :4050. Nothing
     // negotiates this seam: the IDE owns the leader's lifetime and `npx -y`
     // resolves `latest` per spawn, so every rollout mixes builds for hours by
-    // design. The relay frames are additive JSON, so skew works today — this
-    // warning is what turns "works by luck" into "visible when the luck runs
-    // out". Once, not per frame: status frames re-arrive on every change.
+    // design. Package skew is supported only when the relay contract agrees.
+    // Once, not per frame: status frames re-arrive on every change.
     const lv = frame.session?.leaderVersion;
     if (lv && lv !== OWN_VERSION && !this._warnedLeaderSkew) {
       this._warnedLeaderSkew = true;
       process.stderr.write(
         '[customaise-mcp] leader on :4050 is ' + lv + ' but this process is ' + OWN_VERSION +
-        '. Mixed versions relay fine today, but if something is inexplicably wrong, restart the older one.\n',
+        (this.protocolMismatch
+          ? '. Their relay protocols differ; requests are blocked until the older process is restarted.\n'
+          : '. Their relay protocols agree; restart the older process to use the same release everywhere.\n'),
       );
     }
   }

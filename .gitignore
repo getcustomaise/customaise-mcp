@@ -1,3 +1,10 @@
+# Keep this package self-contained when copied to the public repository.
+node_modules/
+dist/
+test-out/
+.customaise/
+*.tgz
+
 test-scripts/
 
 # MCPB Desktop Extension build artifacts

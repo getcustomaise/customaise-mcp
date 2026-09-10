@@ -19,11 +19,13 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { WebSocket } from 'ws';
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:net';
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import { workspaceHeaders } from '../daemon-http.js';
 
 function pkgRoot(): string {
   let dir = dirname(fileURLToPath(import.meta.url));
@@ -100,9 +102,9 @@ const env = () => ({
 });
 
 /** Run the real CLI binary and resolve its exit code and stdout. */
-function runCli(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+function runCli(args: string[], cwd = configDir): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    const p = spawn(process.execPath, [CLI, ...args], { env: env(), cwd: configDir });
+    const p = spawn(process.execPath, [CLI, ...args], { env: env(), cwd });
     let stdout = '';
     let stderr = '';
     p.stdout.on('data', (d) => { stdout += d; });
@@ -121,6 +123,10 @@ function runCli(args: string[]): Promise<{ code: number; stdout: string; stderr:
 async function connectExtension(): Promise<void> {
   await until(async () => {
     const candidate = new WebSocket(`ws://127.0.0.1:${wsPort}`);
+    candidate.on('message', raw => {
+      const frame = JSON.parse(String(raw));
+      if (frame.role === 'hello') hellos.push(frame);
+    });
     try {
       await new Promise<void>((resolve, reject) => {
         candidate.once('open', () => resolve());
@@ -138,9 +144,13 @@ async function connectExtension(): Promise<void> {
 
   extension.on('message', (raw) => {
     const frame = JSON.parse(String(raw));
-    if (frame.role === 'hello') hellos.push(frame);
     if (frame.type === 'dispatch_tool') {
       dispatched.push(frame.tool);
+      if (frame.tool === 'export_script') extension.send(JSON.stringify({
+        type: 'dispatch_tool_pending', session_id: frame.session_id, seq_num: frame.seq_num,
+        expected_timeout_ms: 90_000,
+        reason: `script_save:normalization (${frame.args.saveOperationId}) script=${frame.args.scriptId}`,
+      }));
       extension.send(JSON.stringify({
         type: 'dispatch_ack',
         session_id: frame.session_id,
@@ -187,6 +197,45 @@ describe('CLI exit codes, end to end', () => {
     const { code, stdout } = await runCli(['tabs']);
     assert.equal(code, 0, stdout);
     assert.equal(JSON.parse(stdout).ok, true);
+  });
+
+  it('doctor can reconcile a specific save through authenticated dispatch', async () => {
+    nextAck = { success: true, result: { scriptId: 's1', operationId: 'lost-ack', outcome: 'committed' } };
+    const before = dispatched.length;
+    const result = await runCli(['doctor', '--script', 's1', '--operation', 'lost-ack']);
+    assert.equal(result.code, 0, result.stdout + result.stderr);
+    assert.equal(JSON.parse(result.stdout).data.saveStatus.outcome, 'committed');
+    assert.deepEqual(dispatched.slice(before), ['get_script_save_status']);
+  });
+
+  it('writes real context files into each HTTP caller workspace and rejects a missing declaration', async () => {
+    nextAck = { success: true, result: { overview: { url: 'https://example.com', title: 'Fixture' }, elements: [] } };
+    const record = JSON.parse(readFileSync(join(configDir, 'daemon.json'), 'utf8'));
+    assert.equal(record.workspaceEncoding, 'uri');
+    const url = new URL(`http://127.0.0.1:${httpPort}/mcp`);
+    const dirs = ['project-a', '日本語 %2F'].map(name => join(configDir, name));
+    await Promise.all(dirs.map(async (dir) => {
+      mkdirSync(dir);
+      const client = new Client({ name: 'workspace-test', version: '1' }, { versionNegotiation: { mode: 'auto' } });
+      try {
+        await client.connect(new StreamableHTTPClientTransport(url, { requestInit: {
+          headers: { 'x-customaise-token': record.token, ...workspaceHeaders(dir, true) },
+        } }));
+        const result = await client.callTool({ name: 'get_page_context', arguments: { tabId: 1, output: 'file' } });
+        assert.equal(result.isError, undefined, JSON.stringify(result));
+        assert.equal((result.structuredContent as any).filePath, join(dir, '.customaise', 'page-context.json'));
+        assert.equal(JSON.parse(readFileSync(join(dir, '.customaise', 'page-context.json'), 'utf8')).overview.title, 'Fixture');
+      } finally { await client.close(); }
+    }));
+    const unicodeCli = await runCli(['tabs'], dirs[1]);
+    assert.equal(unicodeCli.code, 0, unicodeCli.stderr);
+    const before = dispatched.length;
+    const rejected = await fetch(url, { method: 'POST', headers: { 'x-customaise-token': record.token },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'get_page_context', arguments: { tabId: 1 } } }) });
+    assert.equal(rejected.status, 400);
+    assert.equal((await rejected.json()).outcome, 'not_dispatched');
+    assert.equal(dispatched.length, before);
+    assert.equal(existsSync(join(configDir, '.customaise', 'page-context.json')), false);
   });
 
   it('the daemon keeps its own name in the client list after serving a CLI call', async () => {
@@ -263,6 +312,7 @@ describe('CLI exit codes, end to end', () => {
     const { code, stdout, stderr } = await runCli(['scripts', 'install', CLI]);
     assert.equal(code, 8, stdout + stderr);
     assert.match(stderr, /Failed canonical parse\. Fix the syntax\./);
+    assert.match(stderr, /script_save:normalization .*script=mcp_script_/);
   });
 
   it('exits 3 when the extension goes away', async () => {

@@ -35,6 +35,10 @@ Everything runs in the browser session where you're already signed in. No API ke
 - Or drag the file into **Settings → Extensions** in Claude Desktop.
 - Or use **Settings → Extensions → Advanced settings → Install Extension** and pick the file.
 
+## Updating to 3.2.3
+
+Install the matching 3.2.3 bundle and restart your MCP clients, including any running Customaise CLI daemon. Mixed relay versions reject requests instead of retrying indefinitely. Extension 1.3.4 provides the complete save-progress, cancellation and recovery behavior; older compatible extensions can still connect.
+
 ## How it talks to your browser
 
 Claude Desktop spawns this bundle as a local Node.js process. The bundle opens a WebSocket to the Customaise extension on `localhost:4050`. Everything stays on your machine. The bundle does not call Customaise servers for tool execution; the extension does, using your signed-in browser session.
@@ -44,9 +48,9 @@ Claude Desktop spawns this bundle as a local Node.js process. The bundle opens a
 | Symptom | Fix |
 |---|---|
 | Tools list is empty | Make sure Chrome is running and the active tab matches an installed AgentScript |
-| "MCP bridge disabled" error | Open Customaise → enable the MCP bridge under Developer Tools |
+| "MCP bridge disabled" error | Open Customaise → Settings → MCP & Terminal → enable Agent Bridge |
 | Hitting the free-tier MCP call limit | Open a Power User plan at [customaise.com/pricing](https://customaise.com/pricing) for unlimited use |
-| Port 4050 in use | Set `CUSTOMAISE_WS_PORT` in this extension's settings to a free port |
+| Port 4050 in use | Customaise clients normally share one bridge. Close any unrelated service using 4050, then restart your MCP clients |
 
 ## Learn more
 

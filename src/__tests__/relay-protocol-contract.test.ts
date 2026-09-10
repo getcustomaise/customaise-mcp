@@ -11,7 +11,7 @@
  * in each direction, because only it can — the newer side cannot know rules
  * that had not been written when the older one shipped. Concretely:
  *
- *   - a leader evicts (close 4001) a follower whose hello disagrees
+ *   - a leader keeps mismatched followers idle and rejects their requests
  *   - a follower refuses to dispatch through a leader whose status frame
  *     disagrees or lacks the field entirely, with a typed error that names
  *     both versions and which process to restart
@@ -81,39 +81,42 @@ describe('relay protocol contract', () => {
     );
   });
 
-  it('a leader evicts a follower from a different contract, naming both versions', async () => {
+  it('a leader keeps old followers connected but blocks both request routes', async () => {
     const port = await freePort();
     const leader = new ExtensionBridge(port);
     await leader.start();
     open.push(leader);
 
     const ws = new WebSocket(`ws://127.0.0.1:${port}`, { origin: FOLLOWER_ORIGIN });
-    let closeCode = 0;
-    let closeReason = '';
-    const closed = new Promise<void>((resolve) => {
-      ws.on('close', (code, reason) => { closeCode = code; closeReason = reason.toString(); resolve(); });
-    });
+    open.push(ws);
+    const responses: any[] = [];
+    ws.on('message', data => responses.push(JSON.parse(data.toString())));
     ws.on('open', () => {
-      // An OLDER package on a different contract. A newer one is yielded to
-      // rather than evicted (leader-election.test.ts), because the newer
-      // process can always evict us and its message points at a process that
-      // can actually be restarted; ours would point at an immortal daemon.
-      ws.send(JSON.stringify({ role: 'follower-hello', relayProtocol: 999, version: '0.0.1' }));
+      // Already-running 3.2.2 clients cannot acquire the new backoff fix.
+      // Closing this socket after greeting them causes a hot reconnect loop.
+      ws.send(JSON.stringify({ role: 'follower-hello', relayProtocol: 1, version: '3.2.2' }));
+      ws.send(JSON.stringify({ role: 'client-info', name: 'old-ide', version: '1' }));
+      ws.send(JSON.stringify({ role: 'req', id: 'raw', type: 'list_tabs', args: {} }));
+      ws.send(JSON.stringify({ role: 'req-dispatch', id: 'write', tool: 'export_script', args: { code: 'const x = 1;' } }));
     });
-    // Bounded, so a leader that NOTICES the mismatch but no longer evicts
-    // fails this test in three seconds instead of hanging the whole suite —
-    // which is exactly what the first mutant of this gate did.
-    const evicted = await Promise.race([
-      closed.then(() => true),
-      new Promise<boolean>((r) => setTimeout(() => r(false), 3000)),
-    ]);
-    try { ws.close(); } catch { /* may already be closed */ }
-    assert.equal(evicted, true, 'leader accepted a follower from a different relay contract');
-
-    assert.equal(closeCode, 4001);
-    assert.match(closeReason, /relay_protocol_mismatch/);
-    assert.match(closeReason, new RegExp(`leader speaks ${RELAY_PROTOCOL_VERSION}`));
-    assert.match(closeReason, /follower speaks 999/);
+    await until(() => responses.filter(frame => frame.role === 'res').length === 2, 'typed rejections');
+    for (const frame of responses.filter(frame => frame.role === 'res')) {
+      const error = JSON.parse(frame.error);
+      assert.equal(frame.success, false);
+      assert.equal(error.code, ERROR_CODE_RELAY_PROTOCOL_MISMATCH);
+      assert.equal(error.data.type, 'relay_protocol_mismatch');
+      assert.match(error.message, new RegExp(`leader speaks ${RELAY_PROTOCOL_VERSION}`));
+      assert.match(error.message, /follower speaks 1/);
+    }
+    await new Promise(resolve => setTimeout(resolve, 150));
+    assert.equal(ws.readyState, WebSocket.OPEN, 'mismatched follower must remain idle without reconnecting');
+    (leader as any)._broadcastPushToFollowers('script_changed', { id: 'private-script' });
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(responses.some(frame => frame.role === 'push'), false);
+    assert.equal((leader as any).pending.size, 0);
+    assert.equal((leader as any).dispatchPending.size, 0);
+    ws.close();
+    await until(() => (leader as any).followerProtocolMismatches.size === 0, 'mismatch cleanup');
   });
 
   it('a matching handshake heals the mismatch without a restart', async () => {

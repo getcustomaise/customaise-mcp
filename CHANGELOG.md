@@ -2,6 +2,33 @@
 
 All notable changes to `@customaise/mcp` will be documented in this file.
 
+## [3.2.3] - 2026-09-10
+
+More reliable script saves and CLI connections, with progress and recovery information when a request is interrupted.
+
+### Fixed
+
+- **Script-save progress and cancellation.** Saves report their operation ID and preparation stage. Timeouts and client cancellation reach the owned request through both leader and follower processes. With extension 1.3.4, the deadline includes queueing and document setup, and delayed older saves cannot overwrite newer work.
+- **Stale edits and uncertain save results.** `import_script` returns a source hash; `export_script` accepts `expectedCodeHash` to reject an edit based on outdated code. Check a save after a lost reply with `get_bridge_status({ scriptId, operationId })` or `customaise doctor --script ID --operation ID`. Status checks require the authenticated bridge and do not consume tool quota.
+- **CLI workspace isolation.** Concurrent starts, replaced daemon credentials and project switching recover without deleting another daemon's token or inheriting another caller's workspace. Invalid tab identifiers return usage errors. Unicode paths use an explicit encoding; older daemons that cannot represent a path explain how to restart and retry.
+- **Progress while waiting for approval.** HTTP/SSE responses stream immediately with backpressure instead of buffering until completion. Approval heartbeats reach the caller while a decision is pending.
+- **Bounded HTTP requests.** Uploads, responses, concurrent requests and workspace retention have explicit limits. Disconnects and deadlines cancel owned requests; work that ignores cancellation keeps its admission slot until it settles.
+- **Mixed-version reconnect loops.** Incompatible leader/follower relay versions return a clear rejection instead of repeatedly reconnecting. Normal leader handover remains available.
+
+### Compatibility and limits
+
+- Update all MCP processes together, including a running CLI daemon. The internal leader/follower relay now uses protocol 2. The same 19 MCP tools and extension bridge protocol are retained; full save cancellation and durable receipts require extension **1.3.4**. Older bridge-compatible extensions can still connect.
+- Custom HTTP clients must send an absolute `x-customaise-workspace` on every request, including negotiation. URI-encoded paths also send `x-customaise-workspace-encoding: uri`; without it, percent escapes are literal. The CLI supplies these headers automatically. Stdio keeps its existing cwd/environment resolution.
+- HTTP limits: uploads **8 MiB / 30 seconds**, cumulative responses **32 MiB**, concurrency **16**, recent workspaces **256 / 15 minutes**, and request duration **10 minutes**.
+- A native storage write already submitted cannot be recalled. A timeout after submission can leave the outcome unknown; inspect the save status before retrying. An oversized response fails the transport rather than returning a truncated success.
+- MCP tools cannot approve their own consent prompts. Remote approval routing does not independently authenticate a human or device against an agent with account credentials or full computer access.
+
+### Release packaging
+
+- The npm package and Claude Desktop `.mcpb` are prepared together. Release verification compares packaged JavaScript with the build, checks installed dependencies against the tested lockfile, and starts both artifacts to verify their tools and conventions.
+- The Desktop builder uses the tested lockfile and an explicitly selected, pinned packer. Zod 4.6.1 and jose 6.2.12 align the lockfile with the verified npm installation.
+- The public source mirror includes the complete source and test suite, builds independently, and ignores its own dependencies and build output. Mirror JSON output now finishes writing before the process exits.
+
 ## [3.2.2] - 2026-09-01
 
 ### Fixed

@@ -331,8 +331,14 @@ export class ElectingBridge implements Bridge {
     void lost.close();
     // A step-down names the process that should bind first; everyone else
     // holds back so it does. Zero when it is us, or when the leader just died.
-    const yieldMs = lost.reelectionDelayMs;
-    if (yieldMs) log(`Holding back ${yieldMs}ms so the newer process can take :${this.port} first`);
+    // A greeted connection can still be evicted for a protocol mismatch.
+    // That counts as a successful runElection, so its retry backoff never
+    // runs. The incompatible leader still owns the port: pace these probes
+    // explicitly, including across repeated successful-then-evicted joins.
+    const yieldMs = this.mismatchReason ? ELECTION_BACKOFF_MAX_MS : lost.reelectionDelayMs;
+    if (yieldMs) log(this.mismatchReason
+      ? `Waiting ${yieldMs}ms before probing the incompatible leader again`
+      : `Holding back ${yieldMs}ms so the newer process can take :${this.port} first`);
     this.electing = (yieldMs ? this.backoff(yieldMs) : Promise.resolve())
       .then(() => this.runElection('recover'))
       .then((next) => {

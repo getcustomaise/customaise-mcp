@@ -10,7 +10,10 @@
 
 import { describe, it, beforeEach, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { unlinkSync, rmSync } from 'node:fs';
+import { unlinkSync, rmSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { withRequestContext } from '../request-context.js';
 import { registerTools, registerPromptsAndResources } from '../server.js';
 
 const TMP_TEST_FILES = [
@@ -187,7 +190,12 @@ describe('Server Tool Registration', () => {
         const toolEntry = server._tools.find(t => t.name === tool);
         assert.ok(toolEntry, `Tool '${tool}' not found`);
 
-        await toolEntry!.handler(args || {});
+        const workspace = mkdtempSync(join(tmpdir(), 'customaise-server-test-'));
+        try {
+          await withRequestContext({ workspaceDir: workspace }, () => toolEntry!.handler(args || {}));
+        } finally {
+          rmSync(workspace, { recursive: true, force: true });
+        }
 
         // Some tools also invoke checkUserScriptsGate(), which adds a
         // legitimate 'get_system_status' dispatch alongside the primary
