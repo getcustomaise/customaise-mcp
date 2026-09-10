@@ -229,7 +229,9 @@ describe('leadership is re-elected when the leader goes away', () => {
     const evictor = new WebSocketServer({ port });
     await new Promise((r) => evictor.on('listening', r));
     open.push({ close: () => new Promise<void>((r) => { for (const c of evictor.clients) c.terminate(); evictor.close(() => r()); }) });
+    let connections = 0;
     evictor.on('connection', (ws) => {
+      connections++;
       ws.send(JSON.stringify({ role: 'status', relayProtocol: 1, extensionConnected: false }));
       ws.on('message', () => ws.close(4001, 'relay_protocol_mismatch: leader speaks 999, follower speaks 1. Restart the older of the two.'));
     });
@@ -252,12 +254,14 @@ describe('leadership is re-elected when the leader goes away', () => {
       },
     );
     assert.ok(Date.now() - started < 500, 'must fail at once, not wait out the election');
+    await new Promise(resolve => setTimeout(resolve, 500));
+    assert.equal(connections, 1, 'successful status handshake followed by eviction must not reset reconnect backoff');
 
     // The mismatched leader dying and a compatible one winning the port is
     // the normal recovery, and it must clear the verdict.
     await open.shift()!.close();
     await until(async () =>
-      (await errorTypeOf(() => follower.request('list_tabs'))) === 'extension_not_connected');
+      (await errorTypeOf(() => follower.request('list_tabs'))) === 'extension_not_connected', 7000);
     assert.equal(follower.role, 'leader');
   });
 

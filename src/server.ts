@@ -1,6 +1,7 @@
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
 import { z } from 'zod';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
 
@@ -10,13 +11,13 @@ import { tmpdir, homedir } from 'node:os';
  * - Claude Desktop: cwd is homedir (fine)
  * - Antigravity: cwd is '/' → falls back to homedir
  */
-function getWorkspaceDir(): string {
-  // 1. What the caller declared for THIS request. Only the CLI sets it, and
+export function getWorkspaceDir(): string {
+  // 1. What the caller declared for THIS request. HTTP callers must set it, and
   //    it must win: the daemon it talks to was spawned from some other
   //    directory entirely and would otherwise scatter context files
   //    somewhere the user cannot see.
   const declared = currentRequestContext().workspaceDir;
-  if (declared && declared !== '/' && declared !== '') {
+  if (declared) {
     return declared;
   }
   // 2. The documented escape hatch. The public install instructions tell
@@ -234,6 +235,7 @@ IMPORTANT: Save files inside your current workspace or project directory (e.g., 
               const result = await bridge.dispatchTool('import_script', { scriptId: effectiveScriptId }) as {
                 scriptId: string;
                 source: string;
+                codeHash?: string;
                 metadata: Record<string, unknown>;
               };
 
@@ -269,6 +271,7 @@ IMPORTANT: Save files inside your current workspace or project directory (e.g., 
                     filePath,
                     scriptId: result.scriptId,
                     metadata: result.metadata,
+                    codeHash: result.codeHash,
                     bytesWritten: Buffer.byteLength(result.source, 'utf-8'),
                     ...(forkOutcome ? {
                       forked: true,
@@ -283,15 +286,26 @@ IMPORTANT: Save files inside your current workspace or project directory (e.g., 
               };
             });
 
-  server.registerTool('export_script', { description: `Export a script from a local file into Customaise. The file will be validated through Customaise's sanitization pipeline (syntax checking, AST validation, security analysis). If valid, the script is installed and ready to execute on matching pages. If invalid, detailed diagnostics explain exactly what to fix. Pass scriptId to update an existing script instead of creating a new one. NOTE: You cannot overwrite a shared/subscribed script — they are read-only. If you need to edit a shared script, first call import_script with fork:true (creates an editable independent copy), then export to that copy's scriptId.
+  server.registerTool('export_script', { description: `Export a script from a local file into Customaise. The file will be validated through Customaise's sanitization pipeline (syntax checking, AST validation, security analysis). If valid, the script is installed and ready to execute on matching pages. If invalid, detailed diagnostics explain exactly what to fix. Pass scriptId to update an existing script instead of creating a new one. Pass expectedCodeHash from import_script to reject stale edits. Save progress includes an operation ID and stage. A timeout may leave the outcome unknown: query get_bridge_status with the scriptId and operationId from the error before retrying. The extension enforces a 90-second save deadline and cancels work that has not reached persistence. A storage write already submitted cannot be recalled; its commit receipt resolves that uncertainty. NOTE: You cannot overwrite a shared/subscribed script — they are read-only. If you need to edit a shared script, first call import_script with fork:true (creates an editable independent copy), then export to that copy's scriptId.
 
     Reminder for UserScripts: Must use an IIFE with named functions for symbol-level editing, \`// @namespace https://customaise.com\`, and standard directives (@name, @match, @grant).
     Reminder for AgentScripts: MUST use \`// ==AgentScript==\` block, MUST explicitly declare tools via \`// @webmcp <toolName> <permission>\` (e.g. \`// @webmcp my_tool prompt\`). Permissions: allow (autonomous), prompt (interactive), deny (blocked). Prefer \`prompt\`: in a script you write, \`allow\` resolves as \`prompt\` regardless. Must NOT use IIFEs. CAN use GM_* APIs for persistence, networking, and observability alongside \`navigator.modelContext.registerTool()\`.`, inputSchema: z.object({
               filePath: z.string().describe('Local file path containing the userscript source code'),
-              scriptId: z.string().optional().describe('ID of an existing script to update. Omit to create a new script.')
-            }), annotations: { title: 'Export script', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false } }, async ({ filePath, scriptId }) => {
+              scriptId: z.string().optional().describe('ID of an existing script to update. Omit to create a new script.'),
+              expectedCodeHash: z.string().regex(/^[a-f0-9]{64}$/).optional().describe('SHA-256 from import_script. Reject the save if the installed source has changed since that read.')
+            }), annotations: { title: 'Export script', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false } }, async ({ filePath, scriptId, expectedCodeHash }) => {
               const code = readFileSync(filePath, 'utf-8');
-              const result = await bridge.dispatchTool('export_script', { code, scriptId });
+              const targetId = scriptId || `mcp_script_${randomUUID()}`;
+              const operationId = randomUUID();
+              let result;
+              try {
+                result = await bridge.dispatchTool('export_script', { code, scriptId: targetId, expectedCodeHash, saveOperationId: operationId, deadlineAt: Date.now() + 90_000 });
+              } catch (error) {
+                const err = error as Error & { data?: Record<string, unknown> };
+                err.data = { ...err.data, scriptId: targetId, operationId, outcome: err.data?.outcome || 'unknown',
+                  recovery: 'Call get_bridge_status with scriptId and operationId to check the save outcome before retrying.' };
+                throw err;
+              }
                 const gate = checkUserScriptsGate();
               return {
                 // Two readers, two halves. The model reads `content`, where the
@@ -784,14 +798,14 @@ IMPORTANT: Save files inside your current workspace or project directory (e.g., 
               };
             });
 
-  server.registerTool('get_bridge_status', { description: `Report the bridge's own state: whether the extension is attached, the plan tier, whether you are signed in, whether remote approvals are enabled, and how much of the MCP cap is left today and this week. Costs NO cap units, because it reads state the server already holds rather than calling the browser. Check this before a long run so you find out you have three calls left now rather than mid-task.`, inputSchema: z.object({}), annotations: { title: 'Bridge status', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } }, async () => {
-              // Deliberately NOT `dispatchTool`: this reads the CapSession the
-              // server already holds from init_session and never touches the
-              // extension, so a diagnostic does not spend the headroom it
-              // exists to report on. `doctor` used to call `list_tabs`, which
-              // meant checking why MCP was failing cost a unit of the budget
-              // that might be why it was failing.
-              const snapshot = bridge.getSessionSnapshot();
+  server.registerTool('get_bridge_status', { description: `Report the bridge's own state: whether the extension is attached, the plan tier, whether you are signed in, whether remote approvals are enabled, and how much of the MCP cap is left today and this week. Costs NO cap units. Without scriptId it reads cached bridge state; with scriptId it queries the browser for the latest save status and durable commit receipt. After a timeout, inspect that status before retrying. Unknown means no retained proof, not proof of failure. Check this before a long run so you find out you have three calls left now rather than mid-task.`, inputSchema: z.object({
+              scriptId: z.string().min(1).max(256).optional().describe('Optionally inspect the latest save for this script; reads the browser without spending a cap unit.'),
+              operationId: z.string().min(1).max(128).optional().describe('Save operation ID from export progress or a timeout. Requires scriptId.')
+            }), annotations: { title: 'Bridge status', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } }, async ({ scriptId, operationId }) => {
+              // The default reads the CapSession locally. An explicit save-status
+              // query uses authenticated dispatch with its fixed zero-cost policy.
+              if (operationId && !scriptId) throw new Error('scriptId is required with operationId');
+              const snapshot = { ...bridge.getSessionSnapshot(), ...(scriptId ? { saveStatus: await bridge.dispatchTool('get_script_save_status', { scriptId, operationId }) } : {}) };
               return {
                 structuredContent: asStructuredContent(snapshot),
                 content: [{ type: 'text' as const, text: JSON.stringify(snapshot, null, 2) }]

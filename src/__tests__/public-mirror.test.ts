@@ -86,7 +86,8 @@ describe('public mirror plan', () => {
   it('does not ship the test residue the suite writes into the repo', () => {
     const leaked = plan.include.filter((p) => p.startsWith('.customaise/'));
     assert.deepEqual(leaked, [], 'mock fixtures would be published');
-    assert.ok(plan.exclude.some((e) => e.path.startsWith('.customaise/')), 'the exclusion is no longer being applied');
+    // A clean public clone has no tracked test residue to exclude. The
+    // no-leak assertion above applies both there and in the monorepo.
   });
 
   it('surfaces uncommitted source rather than silently omitting it', () => {

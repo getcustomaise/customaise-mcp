@@ -19,7 +19,7 @@
  * memory.
  */
 
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import {
   cpSync,
   existsSync,
@@ -42,8 +42,8 @@ function log(msg) {
   process.stdout.write(`[build-mcpb] ${msg}\n`);
 }
 
-function run(cmd, cwd = HERE) {
-  execSync(cmd, { cwd, stdio: 'inherit' });
+function run(command, args, cwd = HERE) {
+  execFileSync(command, args, { cwd, stdio: 'inherit' });
 }
 
 function readJson(path) {
@@ -69,7 +69,7 @@ log(`@customaise/mcp version: ${VERSION}`);
 // about what is in dist. tsc takes a couple of seconds; a bundle built from
 // stale code is found by users.
 log('rebuilding mcp/dist from source');
-run('npm run build', MCP_ROOT);
+run('npm', ['run', 'build'], MCP_ROOT);
 const distIndex = join(MCP_ROOT, 'dist', 'index.js');
 if (!existsSync(distIndex)) {
   throw new Error('npm run build did not produce mcp/dist/index.js');
@@ -114,8 +114,16 @@ const slimPkg = {
 writeJson(join(SERVER_STAGING, 'package.json'), slimPkg);
 log('wrote staging/server/package.json (sharp/@img excluded)');
 
-// 6. Install production deps inside staging/server/.
-run('npm install --omit=dev --no-audit --no-fund', SERVER_STAGING);
+// 6. Install the tested production graph. Resolving ranges afresh here can
+// silently ship different dependencies than the source tests ran against.
+// Use the full package during npm ci, then remove the CLI-only client and
+// restore the Desktop package surface without re-resolving any dependencies.
+writeJson(join(SERVER_STAGING, 'package.json'), mcpPkg);
+cpSync(join(MCP_ROOT, 'package-lock.json'), join(SERVER_STAGING, 'package-lock.json'));
+run('npm', ['ci', '--omit=dev', '--no-audit', '--no-fund'], SERVER_STAGING);
+rmSync(join(SERVER_STAGING, 'node_modules', '@modelcontextprotocol', 'client'), { recursive: true, force: true });
+writeJson(join(SERVER_STAGING, 'package.json'), slimPkg);
+rmSync(join(SERVER_STAGING, 'package-lock.json'));
 
 // 7. Defensive scrub: even if a transitive sneaks in, strip native blobs.
 const nm = join(SERVER_STAGING, 'node_modules');
@@ -155,10 +163,13 @@ log('wrote staging/package.json (version shim for PKG_VERSION IIFE)');
 
 // 9. Pack via @anthropic-ai/mcpb. Output ends up at mcp/customaise.mcpb.
 log('packing → mcp/customaise.mcpb');
-run(`npx -y @anthropic-ai/mcpb pack "${STAGING}" "${OUTPUT}"`, HERE);
+// Explicit package/bin selection also works inside an outer npm exec runtime.
+// Pin the packer so a fresh release build does not silently change its format.
+const MCPB_TOOL = '@anthropic-ai/mcpb@2.1.2';
+run('npm', ['exec', '--yes', '--package=' + MCPB_TOOL, '--', 'mcpb', 'pack', STAGING, OUTPUT]);
 
 // 10. Show info on the produced bundle.
-run(`npx -y @anthropic-ai/mcpb info "${OUTPUT}"`, HERE);
+run('npm', ['exec', '--yes', '--package=' + MCPB_TOOL, '--', 'mcpb', 'info', OUTPUT]);
 
 log('done.');
 log(`artifact: ${OUTPUT}`);

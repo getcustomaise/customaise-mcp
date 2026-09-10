@@ -15,7 +15,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { WebSocket } from 'ws';
-import { mkdtempSync, rmSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -158,5 +158,16 @@ describe('a cold-start race leaves one daemon and one token', () => {
     assert.equal(r.code, 0);
     const after = JSON.parse((await runCli(['daemon', 'status'])).stdout).data.pid;
     assert.equal(after, before, 'the daemon was replaced when it should have been reused');
+  });
+
+  it('recovers a stale record after the configured HTTP port changes', async () => {
+    await runCli(['daemon', 'stop']);
+    const oldPort = await freePort();
+    writeFileSync(join(configDir, 'daemon.json'), JSON.stringify({
+      token: 'stale-token', port: oldPort, pid: 99999999, version: '0.0.0',
+    }));
+    const result = await runCli(['tabs']);
+    assert.equal(result.code, 0, result.stderr || result.stdout);
+    assert.equal(JSON.parse((await runCli(['daemon', 'status'])).stdout).data.port, httpPort);
   });
 });

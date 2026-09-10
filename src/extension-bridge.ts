@@ -43,6 +43,7 @@ import {
   ERROR_CODE_DISPATCH_TIMEOUT,
   ERROR_CODE_EXTENSION_OUTDATED,
   ERROR_CODE_INTEGRITY_VIOLATION,
+  ERROR_CODE_RELAY_PROTOCOL_MISMATCH,
   incrementLocalLegacyCounter,
   markLegacy,
   rolloverDailyIfNeeded,
@@ -197,6 +198,7 @@ type FollowerFrame =
   | { role: 'follower-hello'; relayProtocol: number; version?: string }
   | { role: 'req'; id: string; type: string; args: Record<string, unknown> }
   | { role: 'req-dispatch'; id: string; tool: string; args: Record<string, unknown> }
+  | { role: 'req-cancel'; id: string }
   | { role: 'client-info'; name: string; version: string };
 
 type LeaderFrame =
@@ -290,6 +292,7 @@ export class ExtensionBridge implements Bridge {
   private newerFollowerHandler: ((version: string) => void) | null = null;
   /** Followers whose hello carried a newer version, awaiting their client-info. */
   private followerVersions = new Map<WebSocket, string>();
+  private followerProtocolMismatches = new Map<WebSocket, string>();
   /** Set by `stepDown`; changes the close code `close()` sends to followers. */
   private steppingDownFor: string | null = null;
   private myClientInfo: BridgeClientInfo | null = null;
@@ -316,6 +319,7 @@ export class ExtensionBridge implements Bridge {
   // path relays `res-pending` to followers. Without this, follower
   // IDEs would time out at 30s on every HITL-gated tool call even
   // though the leader's timer correctly extended.
+  private followerDispatchControllers = new Map<WebSocket, Map<string, AbortController>>();
   private dispatchPending = new Map<number, {
     resolve: (value: unknown) => void;
     reject: (reason: Error) => void;
@@ -323,6 +327,7 @@ export class ExtensionBridge implements Bridge {
     tool: string;
     origin: 'leader' | WebSocket;
     followerOrigId?: string;
+    cancel: (reason: string) => void;
     onPending?: (info: PendingDispatchInfo) => void;
   }>();
   // Resolves when init_session arrives OR the grace timer marks the
@@ -559,12 +564,17 @@ export class ExtensionBridge implements Bridge {
       });
       return;
     }
+    const controllers = this.followerDispatchControllers.get(ws) || new Map<string, AbortController>();
+    if (controllers.has(origId)) return;
+    const controller = new AbortController();
+    controllers.set(origId, controller);
+    this.followerDispatchControllers.set(ws, controllers);
     try {
       // Track origin = ws so _handleDispatchToolPending can relay
       // HITL timer-extend frames to this follower (otherwise the
       // follower's own pending timer would fire at 30s while the
       // leader correctly awaits user consent for up to 5 min).
-      const result = await this._dispatchToolWithOrigin(tool, args, ws, origId);
+      const result = await this._dispatchToolWithOrigin(tool, args, ws, origId, { signal: controller.signal });
       this._sendToFollower(ws, { role: 'res', id: origId, success: true, result });
     } catch (err) {
       // Preserve ProtocolError code + data through the relay so the follower
@@ -598,6 +608,9 @@ export class ExtensionBridge implements Bridge {
           error: (err as Error)?.message || 'dispatchTool failed',
         });
       }
+    } finally {
+      controllers.delete(origId);
+      if (!controllers.size) this.followerDispatchControllers.delete(ws);
     }
   }
 
@@ -624,6 +637,7 @@ export class ExtensionBridge implements Bridge {
       const hadClientInfo = this.followerClientInfos.has(ws);
       this.followerClientInfos.delete(ws);
       this.followerVersions.delete(ws);
+      this.followerProtocolMismatches.delete(ws);
       // Reject any v1 requests still in-flight on behalf of this follower.
       for (const [id, pending] of this.pending) {
         if (pending.origin === ws) {
@@ -650,6 +664,8 @@ export class ExtensionBridge implements Bridge {
       // closure (capturing ws, origId, tool name) leaks. Per
       // disconnected-follower-during-dispatch event, one Promise
       // chain leaks until process exit. Reject releases it.
+      for (const controller of this.followerDispatchControllers.get(ws)?.values() || []) controller.abort();
+      this.followerDispatchControllers.delete(ws);
       for (const [seqNum, dispatch] of this.dispatchPending) {
         if (dispatch.origin === ws) {
           clearTimeout(dispatch.timer);
@@ -693,10 +709,17 @@ export class ExtensionBridge implements Bridge {
     }
     // The relay contract, enforced at the door. A follower built against a
     // different frame vocabulary must not be served: every shared frame after
-    // this one would have undefined semantics, and undefined-silently is the
-    // failure mode this constant exists to kill. The follower gets a close
-    // reason it can surface verbatim. See RELAY_PROTOCOL_VERSION in bridge.ts.
+    // this one would have undefined semantics. Keep mismatched sockets idle
+    // and reject their requests: older ElectingBridge clients reconnect in
+    // a hot loop if evicted after the initial status handshake.
     if (message.role === 'follower-hello') {
+      if (message.relayProtocol !== RELAY_PROTOCOL_VERSION) {
+        const reason = `relay_protocol_mismatch: leader speaks ${RELAY_PROTOCOL_VERSION}, follower speaks ${message.relayProtocol}. Restart the older of the two processes.`;
+        this.followerProtocolMismatches.set(ws, reason);
+        this._log(`Follower blocked: ${reason}`);
+      } else {
+        this.followerProtocolMismatches.delete(ws);
+      }
       // A follower from a newer package. A leader that holds the port for
       // as long as Chrome is open (a resident daemon does) would otherwise
       // pin every editor on this machine to its version forever: the
@@ -729,16 +752,6 @@ export class ExtensionBridge implements Bridge {
         this.followerVersions.set(ws, followerVersion);
         return;
       }
-      if (message.relayProtocol !== RELAY_PROTOCOL_VERSION) {
-        this._log(
-          `Evicting follower: relay protocol ${message.relayProtocol} != ${RELAY_PROTOCOL_VERSION}` +
-          (message.version ? ` (follower version ${message.version})` : ''));
-        try {
-          ws.close(4001,
-            `relay_protocol_mismatch: leader speaks ${RELAY_PROTOCOL_VERSION}, follower speaks ` +
-            `${message.relayProtocol}. Restart the older of the two processes.`);
-        } catch { /* already closing */ }
-      }
       return;
     }
     if (message.role === 'client-info') {
@@ -764,6 +777,21 @@ export class ExtensionBridge implements Bridge {
           }
         }
       }
+      return;
+    }
+    const mismatch = this.followerProtocolMismatches.get(ws);
+    if (mismatch) {
+      if ((message.role === 'req' || message.role === 'req-dispatch') && typeof message.id === 'string') {
+        this._sendToFollower(ws, {
+          role: 'res', id: message.id, success: false,
+          error: JSON.stringify({ code: ERROR_CODE_RELAY_PROTOCOL_MISMATCH, message: mismatch,
+            data: { type: 'relay_protocol_mismatch' } }),
+        });
+      }
+      return;
+    }
+    if (message.role === 'req-cancel') {
+      this.followerDispatchControllers.get(ws)?.get(message.id)?.abort();
       return;
     }
     if (message.role === 'req-dispatch') {
@@ -1061,6 +1089,7 @@ export class ExtensionBridge implements Bridge {
       try { f.close(code, reason); } catch { /* terminated below */ }
     }
     this.followerSockets.clear();
+    this.followerProtocolMismatches.clear();
 
     return new Promise((resolve) => {
       if (!this.wss) { resolve(); return; }
@@ -1345,17 +1374,7 @@ export class ExtensionBridge implements Bridge {
       DISPATCH_ACK_TIMEOUT_MS,
     );
     clearTimeout(pending.timer);
-    pending.timer = setTimeout(() => {
-      if (!this.dispatchPending.has(frame.seq_num)) return;
-      this.dispatchPending.delete(frame.seq_num);
-      pending.reject(
-        new ProtocolError(
-          ERROR_CODE_DISPATCH_TIMEOUT,
-          `MCP dispatch timed out after ${extendMs}ms (tool=${pending.tool}, awaiting user consent). The user did not approve in time; retry the call.`,
-          { type: 'dispatch_timeout', tool: pending.tool, timeoutMs: extendMs, reason: 'awaiting_user_consent' },
-        ),
-      );
-    }, extendMs);
+    pending.timer = setTimeout(() => pending.cancel('deadline expired'), extendMs);
     // Relay to the originating follower (if this dispatch came from
     // one) so the follower's local pending timer extends in lockstep.
     // Without this the follower would time out at its own
@@ -1448,7 +1467,9 @@ export class ExtensionBridge implements Bridge {
     // Pre-check cap. Skip-for-paid handled inside decideDispatch
     // (returns allow:true for 'unlimited' mode).
     const decision = decideDispatch(this.capSession, now);
-    if (decision.allow === false) {
+    // A fixed read-only diagnostic remains available after quota exhaustion.
+    // It still traverses authenticated dispatch and the integrity checks.
+    if (decision.allow === false && !(toolName === 'get_script_save_status' && decision.code === ERROR_CODE_CAP_EXCEEDED)) {
       throw new ProtocolError(decision.code, decision.message, decision.data);
     }
 
@@ -1485,50 +1506,31 @@ export class ExtensionBridge implements Bridge {
     const sessionId = this.capSession.sessionId;
 
     return new Promise<unknown>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        if (!this.dispatchPending.has(seqNum)) return;
+      const signal = opts.signal ?? currentRequestContext().signal;
+      const onAbort = () => cancel('caller cancelled the request');
+      const cancel = (reason: string) => {
+        const pending = this.dispatchPending.get(seqNum);
+        if (!pending) return;
         this.dispatchPending.delete(seqNum);
-        reject(
-          new ProtocolError(
-            ERROR_CODE_DISPATCH_TIMEOUT,
-            `MCP dispatch timed out after ${DISPATCH_ACK_TIMEOUT_MS}ms (tool=${toolName}). The extension may be unresponsive; reload the target tab and retry.`,
-            { type: 'dispatch_timeout', tool: toolName, timeoutMs: DISPATCH_ACK_TIMEOUT_MS },
-          ),
-        );
-      }, DISPATCH_ACK_TIMEOUT_MS);
-
+        clearTimeout(pending.timer);
+        try { this.extensionSocket?.send(JSON.stringify({ type: 'cancel_dispatch', session_id: sessionId, seq_num: seqNum, reason })); }
+        catch { /* the extension's own deadline still fences persistence */ }
+        pending.reject(new ProtocolError(ERROR_CODE_DISPATCH_TIMEOUT,
+          `MCP dispatch ${reason} (tool=${toolName}). Check the operation outcome before retrying a write.`,
+          { type: reason === 'deadline expired' ? 'dispatch_timeout' : 'dispatch_cancelled', tool: toolName,
+            timeoutMs: DISPATCH_ACK_TIMEOUT_MS, outcome: 'unknown',
+            ...(toolName === 'export_script' ? { scriptId: args.scriptId, operationId: args.saveOperationId,
+              recovery: 'Query get_bridge_status with scriptId and operationId; a timeout does not prove the script was not saved.' } : {}) }));
+      };
+      const timer = setTimeout(() => cancel('deadline expired'), DISPATCH_ACK_TIMEOUT_MS);
       this.dispatchPending.set(seqNum, {
-        resolve, reject, timer, tool: toolName, origin, followerOrigId,
+        resolve: value => { signal?.removeEventListener('abort', onAbort); resolve(value); },
+        reject: error => { signal?.removeEventListener('abort', onAbort); reject(error); },
+        timer, tool: toolName, origin, followerOrigId, cancel,
         onPending: opts.onPending ?? currentRequestContext().onPending,
       });
-
-      // Caller abandoned the request (Ctrl-C on the CLI, a cancelled IDE
-      // call). Tell the extension so it closes the consent modal this
-      // dispatch was waiting on, rather than leaving it open for its full
-      // five minutes with nobody coming back for the answer.
-      const signal = opts.signal ?? currentRequestContext().signal;
-      if (signal) {
-        const onAbort = () => {
-          if (!this.dispatchPending.has(seqNum)) return;
-          this.dispatchPending.delete(seqNum);
-          clearTimeout(timer);
-          try {
-            this.extensionSocket?.send(JSON.stringify({
-              type: 'cancel_dispatch',
-              session_id: sessionId,
-              seq_num: seqNum,
-              reason: 'caller cancelled the request',
-            }));
-          } catch { /* the socket going away has the same effect */ }
-          reject(new ProtocolError(
-            ERROR_CODE_DISPATCH_TIMEOUT,
-            `Dispatch cancelled by the caller (tool=${toolName}).`,
-            { type: 'dispatch_cancelled', tool: toolName },
-          ));
-        };
-        if (signal.aborted) { onAbort(); return; }
-        signal.addEventListener('abort', onAbort, { once: true });
-      }
+      if (signal?.aborted) { onAbort(); return; }
+      signal?.addEventListener('abort', onAbort, { once: true });
 
       const frame = {
         type: 'dispatch_tool' as const,
@@ -1540,6 +1542,7 @@ export class ExtensionBridge implements Bridge {
       try {
         this.extensionSocket!.send(JSON.stringify(frame));
       } catch (err) {
+        signal?.removeEventListener('abort', onAbort);
         this.dispatchPending.delete(seqNum);
         clearTimeout(timer);
         reject(
@@ -1557,6 +1560,7 @@ export class ExtensionBridge implements Bridge {
     if (this.followerSockets.size === 0) return;
     const frame: LeaderFrame = { role: 'push', type, data };
     for (const f of this.followerSockets) {
+      if (this.followerProtocolMismatches.has(f)) continue;
       this._sendToFollower(f, frame);
     }
   }

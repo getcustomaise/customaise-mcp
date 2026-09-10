@@ -17,46 +17,43 @@
 
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { withRequestContext, currentRequestContext } from '../request-context.js';
+import { homedir } from 'node:os';
+import { withRequestContext } from '../request-context.js';
+import { getWorkspaceDir } from '../server.js';
 
-// Mirrors the resolution in server.ts's getWorkspaceDir, which is module
-// private. Kept in step by asserting the same ordering rules.
-function resolve(env: string | undefined, cwd: string): string {
-  const declared = currentRequestContext().workspaceDir;
-  if (declared && declared !== '/' && declared !== '') return declared;
-  if (env && env !== '/' && env !== '') return env;
-  return cwd;
-}
+const originalEnv = process.env.CUSTOMAISE_WORKSPACE;
 
 describe('workspace resolution', () => {
-  afterEach(() => { delete process.env.CUSTOMAISE_WORKSPACE; });
+  afterEach(() => {
+    if (originalEnv === undefined) delete process.env.CUSTOMAISE_WORKSPACE;
+    else process.env.CUSTOMAISE_WORKSPACE = originalEnv;
+  });
 
-  it('prefers what the caller declared for this request', () => {
+  it('prefers the explicit caller workspace over the environment', () => {
+    process.env.CUSTOMAISE_WORKSPACE = '/from/env';
     withRequestContext({ workspaceDir: '/from/cli' }, () => {
-      assert.equal(resolve('/from/env', '/from/cwd'), '/from/cli');
+      assert.equal(getWorkspaceDir(), '/from/cli');
     });
   });
 
-  it('keeps the env var beating cwd when nothing was declared', () => {
-    // Antigravity depends on this. Breaking it would move their context
-    // files silently.
-    assert.equal(resolve('/from/env', '/from/cwd'), '/from/env');
+  it('preserves the stdio environment override', () => {
+    process.env.CUSTOMAISE_WORKSPACE = '/from/env';
+    assert.equal(getWorkspaceDir(), '/from/env');
   });
 
-  it('falls back to cwd when neither is set', () => {
-    assert.equal(resolve(undefined, '/from/cwd'), '/from/cwd');
+  it('falls back to cwd for stdio', () => {
+    delete process.env.CUSTOMAISE_WORKSPACE;
+    assert.equal(getWorkspaceDir(), process.cwd() === '/' ? homedir() : process.cwd());
   });
 
-  it('ignores a declared root, which is what an unset cwd looks like', () => {
-    withRequestContext({ workspaceDir: '/' }, () => {
-      assert.equal(resolve(undefined, '/from/cwd'), '/from/cwd');
-    });
+  it('honors an explicitly declared root without silently writing elsewhere', () => {
+    process.env.CUSTOMAISE_WORKSPACE = '/from/env';
+    withRequestContext({ workspaceDir: '/' }, () => assert.equal(getWorkspaceDir(), '/'));
   });
 
-  it('does not let one request\'s workspace leak into the next', () => {
-    withRequestContext({ workspaceDir: '/a' }, () => {
-      assert.equal(resolve(undefined, '/cwd'), '/a');
-    });
-    assert.equal(resolve(undefined, '/cwd'), '/cwd');
+  it('does not carry one request workspace into the next', () => {
+    process.env.CUSTOMAISE_WORKSPACE = '/from/env';
+    withRequestContext({ workspaceDir: '/a' }, () => assert.equal(getWorkspaceDir(), '/a'));
+    assert.equal(getWorkspaceDir(), '/from/env');
   });
 });

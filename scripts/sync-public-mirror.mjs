@@ -125,6 +125,7 @@ export function buildPlan() {
 function walk(dir, base = dir, out = []) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     if (entry.name === '.git' || entry.name === 'node_modules') continue;
+    if (dir === base && ['dist', 'test-out'].includes(entry.name)) continue;
     const p = join(dir, entry.name);
     if (entry.isDirectory()) walk(p, base, out);
     else out.push(relative(base, p));
@@ -261,5 +262,5 @@ Next, by hand:
 }
 
 if (process.argv[1] && process.argv[1].endsWith('sync-public-mirror.mjs')) {
-  process.exit(main(process.argv.slice(2)));
+  process.exitCode = main(process.argv.slice(2));
 }

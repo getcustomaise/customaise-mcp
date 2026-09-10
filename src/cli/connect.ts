@@ -24,10 +24,11 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
-import { readDaemonRecord, tokenPath, TOKEN_HEADER, WORKSPACE_HEADER, DEFAULT_HTTP_PORT, type DaemonRecord } from '../daemon.js';
+import { readDaemonRecord, tokenPath, TOKEN_HEADER, DEFAULT_HTTP_PORT, type DaemonRecord } from '../daemon.js';
+import { workspaceHeaders } from '../daemon-http.js';
 import { PKG_VERSION } from '../build-server.js';
 import { EXIT } from './exit-codes.js';
-import { rmSync, mkdirSync, accessSync, constants } from 'node:fs';
+import { mkdirSync, accessSync, constants } from 'node:fs';
 
 /** Install before any connect. See (1) above. */
 export function installCrashGuard(fail: (code: number, message: string) => never): void {
@@ -73,13 +74,16 @@ async function waitForPortFree(port: number, timeoutMs = 5000): Promise<boolean>
   return false;
 }
 
-async function waitForEndpoint(port: number, timeoutMs = 10000): Promise<boolean> {
+async function waitForDaemon(port: number, timeoutMs = 10000): Promise<DaemonRecord | null> {
   const until = Date.now() + timeoutMs;
   while (Date.now() < until) {
-    if (await endpointAnswers(port)) return true;
+    const record = readDaemonRecord();
+    // listen() precedes the atomic token-file write. An open port alone is
+    // not readiness, and a stale record from a different port is not ours.
+    if (record?.port === port && await endpointAnswers(port)) return record;
     await sleep(100);
   }
-  return false;
+  return null;
 }
 
 /**
@@ -129,14 +133,13 @@ export async function connectToDaemon(
     }
 
     spawnDaemon();
-    const port = record?.port ?? (Number(process.env.CUSTOMAISE_HTTP_PORT) || DEFAULT_HTTP_PORT);
-    if (!(await waitForEndpoint(port))) {
+    const port = Number(process.env.CUSTOMAISE_HTTP_PORT) || DEFAULT_HTTP_PORT;
+    record = await waitForDaemon(port);
+    if (!record) {
       fail(EXIT.UNAVAILABLE,
         'The Customaise daemon did not come up on 127.0.0.1:' + port + '.\n' +
         'Run `customaise-mcp daemon` directly to see why it failed.');
     }
-    record = readDaemonRecord();
-    if (!record) fail(EXIT.UNAVAILABLE, 'Daemon started but wrote no token file at ' + tokenPath());
   }
 
   const client = new Client(
@@ -154,17 +157,20 @@ export async function connectToDaemon(
             // Where this invocation is standing. The daemon was spawned once
             // from some other directory and outlived it, so without this any
             // file it writes on our behalf lands somewhere we cannot see.
-            [WORKSPACE_HEADER]: process.cwd(),
+            ...workspaceHeaders(process.cwd(), record.workspaceEncoding === 'uri'),
           },
         },
       },
     ));
   } catch (err: any) {
-    // A rejected token means a stale file from a dead daemon, not a fault.
-    // Delete it and let the caller retry the spawn once.
+    await client.close().catch(() => {});
+    // Another cold-start caller may have replaced the record. Retry that
+    // identity once, without deleting a live daemon's only credential.
     if (opts.allowRestart !== false && /401|unauthorized/i.test(String(err?.message))) {
-      try { rmSync(tokenPath(), { force: true }); } catch { /* best effort */ }
-      return connectToDaemon(fail, { allowRestart: false });
+      const current = readDaemonRecord();
+      if (current && current.token !== record.token) {
+        return connectToDaemon(fail, { allowRestart: false });
+      }
     }
     fail(EXIT.UNAVAILABLE, 'Could not reach the Customaise daemon: ' + (err?.message ?? err));
   }

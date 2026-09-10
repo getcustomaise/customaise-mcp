@@ -36,10 +36,9 @@ export interface BridgeClientInfo {
 /** Per-dispatch options. */
 export interface DispatchOptions {
   /**
-   * Abort the dispatch. When it fires while the extension is blocked on a
-   * consent modal, the bridge tells the extension to close that modal
-   * instead of leaving it open for its full five minutes with nobody
-   * coming back for the answer.
+   * Abort the dispatch across leader/follower hops. The extension closes
+   * pending consent and cancels save preparation. Already-submitted storage
+   * writes cannot be recalled; inspect the durable save receipt afterwards.
    */
   signal?: AbortSignal;
   /** See `RequestContext.onPending`; an explicit one wins over the context's. */
@@ -65,7 +64,9 @@ export interface DispatchOptions {
  * fleet is a designed consequence of unpinned `npx -y` (ARD 4.1). What must
  * never happen silently is mismatched frame SHAPES. So this number moves
  * only when a frame changes incompatibly, and both ends fail closed on a
- * mismatch: the leader evicts a follower whose hello disagrees, and a
+ * mismatch: the leader rejects requests from a follower whose hello
+ * disagrees, keeping its socket idle so older clients do not repeatedly
+ * reconnect after eviction; a
  * follower refuses to dispatch through a leader whose status frame
  * disagrees or predates the field. The OLDER side does the rejecting in
  * each direction, which is the only side that can — the newer one cannot
@@ -77,7 +78,7 @@ export interface DispatchOptions {
  * without a contract; added before 3.0.0 published, while the field is
  * still free to introduce because no fleet exists.
  */
-export const RELAY_PROTOCOL_VERSION = 1;
+export const RELAY_PROTOCOL_VERSION = 2; // Adds owned follower dispatch cancellation.
 
 /**
  * WebSocket close code a leader uses when it steps down for a newer

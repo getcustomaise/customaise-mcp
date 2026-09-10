@@ -43,6 +43,7 @@ function fail(code: number, message: string): never {
 const USAGE = `customaise ${PKG_VERSION}: drive the Customaise extension from a terminal
 
   customaise doctor                       bridge, sign-in, tier, quota, gate
+      --script ID [--operation ID]         inspect a save after a timeout
   customaise tools [--tab N]              WebMCP tools registered on a tab
   customaise call <tool> [--args JSON]    invoke a WebMCP tool
   customaise scripts list                 installed scripts
@@ -90,7 +91,7 @@ JSON on stdout, diagnostics on stderr. Exit: 0 ok, 2 usage, 3 unavailable,
  * other, or names a tool the server does not register.
  */
 const COMMANDS: ReadonlyArray<{ command: string; description: string; tool?: string; flags?: string[] }> = [
-  { command: 'doctor', description: 'bridge, sign-in, tier, quota, gate; costs no quota', tool: 'get_bridge_status' },
+  { command: 'doctor', description: 'bridge, sign-in, tier, quota, gate; costs no quota', tool: 'get_bridge_status', flags: ['--script ID', '--operation ID'] },
   { command: 'tools', description: 'WebMCP tools registered on a tab', tool: 'list_webmcp_tools', flags: ['--tab N'] },
   { command: 'call <tool>', description: 'invoke a WebMCP tool; may wait for the user to approve', tool: 'call_webmcp_tool', flags: ['--args JSON', '--tab N'] },
   { command: 'scripts list', description: 'installed scripts', tool: 'list_scripts' },
@@ -132,7 +133,7 @@ interface Flags { [k: string]: string | boolean }
  * there and exited 0 reporting success. Rejecting here rather than at each
  * call site keeps the next value-taking flag from reintroducing it.
  */
-const VALUE_FLAGS = new Set(['tab', 'out', 'args', 'id']);
+const VALUE_FLAGS = new Set(['tab', 'out', 'args', 'id', 'script', 'operation']);
 
 function parseFlags(argv: string[]): { positional: string[]; flags: Flags } {
   const positional: string[] = [];
@@ -164,6 +165,7 @@ function parseFlags(argv: string[]): { positional: string[]; flags: Flags } {
 function tabNumber(raw: string): number {
   const n = Number(raw);
   if (!Number.isFinite(n)) fail(EXIT.USAGE, 'tab id must be a number, got "' + raw + '"');
+  if (!Number.isSafeInteger(n) || n < 0) fail(EXIT.USAGE, 'tab id must be a non-negative integer');
   return n;
 }
 
@@ -173,7 +175,7 @@ function tabOf(flags: Flags): number | undefined {
   // reach here; absent means "use the sticky tab, else the active one".
   if (raw === undefined) return resolveTab(undefined);
   const n = Number(raw);
-  if (!Number.isFinite(n)) fail(EXIT.USAGE, '--tab expects a number, got "' + raw + '"');
+  if (!Number.isSafeInteger(n) || n < 0) fail(EXIT.USAGE, '--tab expects a non-negative integer, got "' + raw + '"');
   return resolveTab(n);
 }
 
@@ -243,7 +245,7 @@ function handleUse(flags: Flags): never {
     process.exit(EXIT.OK);
   }
   const n = Number(raw);
-  if (!Number.isFinite(n)) fail(EXIT.USAGE, '--tab expects a number, got "' + raw + '"');
+  if (!Number.isSafeInteger(n) || n < 0) fail(EXIT.USAGE, '--tab expects a non-negative integer, got "' + raw + '"');
   writeState({ ...readState(), tabId: n });
   emit({ ok: true, data: { tabId: n } });
   process.exit(EXIT.OK);
@@ -301,6 +303,12 @@ async function main(): Promise<void> {
   }
 
   if (verb === 'use') handleUse(flags);
+  if (verb === 'doctor') {
+    for (const name of ['script', 'operation']) {
+      if (flags[name] !== undefined && (typeof flags[name] !== 'string' || !flags[name])) fail(EXIT.USAGE, `--${name} requires an ID`);
+    }
+    if (flags.operation && !flags.script) fail(EXIT.USAGE, '--operation requires --script');
+  }
 
   // Local, like `init`: the tree does not change with the browser's state.
   if (verb === 'schema') {
@@ -379,7 +387,12 @@ async function main(): Promise<void> {
   const { client, record } = await connectToDaemon(fail);
 
   const callTool = async (name: string, args: Record<string, unknown>) =>
-    client.callTool({ name, arguments: args });
+    client.callTool({ name, arguments: args }, name === 'export_script' ? {
+      // The save has a 90-second absolute deadline; leave room for its final
+      // status to arrive instead of abandoning it at the SDK's 60s default.
+      timeout: 95_000,
+      onprogress: progress => { if (progress.message) process.stderr.write('customaise: ' + progress.message + '\n'); },
+    } : undefined);
 
   /**
    * `customaise call`, which is the one command that can legitimately block
@@ -441,7 +454,10 @@ async function main(): Promise<void> {
       // NO cap unit. This used to call `list_tabs`, so working out why MCP
       // was failing cost one of the fifty daily calls that might be why it
       // was failing.
-      const r: any = await callTool('get_bridge_status', {});
+      const r: any = await callTool('get_bridge_status', {
+        ...(flags.script ? { scriptId: String(flags.script) } : {}),
+        ...(flags.operation ? { operationId: String(flags.operation) } : {}),
+      });
       const s = r?.structuredContent ?? {};
       const gateOff = s.systemStatus?.userScriptsDisabled === true;
       const reachable = !r?.isError && s.extensionConnected === true && !gateOff;
@@ -484,6 +500,8 @@ async function main(): Promise<void> {
         tier: known(s.tier),
         cap,
         remoteApprovals: known(s.remoteApprovals),
+        ...(s.saveStatus ? { saveStatus: s.saveStatus } : {}),
+        ...(r?.isError ? { error: s.error ?? r.content } : {}),
         // The one switch that makes every script inert, and the reason this
         // was worth adding: diagnosing "my tools never appear" without it
         // means checking everything else first.

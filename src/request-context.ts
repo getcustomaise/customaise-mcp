@@ -2,10 +2,9 @@
  * Per-request context, carried without threading a parameter through
  * eighteen tool handlers.
  *
- * The one thing in it is the caller's abort signal. The dispatch layer needs
- * it so an abandoned call can close the consent modal it was waiting on, but
- * it is created by the MCP handler context and consumed several frames deeper
- * in the bridge.
+ * Carries the caller's workspace, abort signal and approval-progress callback.
+ * The dispatch layer uses the signal so an abandoned call can close the
+ * consent modal it was waiting on, several frames deeper in the bridge.
  *
  * `AsyncLocalStorage` rather than a field on the bridge, because the bridge
  * is shared: `createMcpHandler` builds a fresh server per request against one
@@ -38,8 +37,8 @@ export interface RequestContext {
    * directory, so `process.cwd()` has always been right for it. A daemon is
    * spawned once from wherever the first CLI invocation happened to be and
    * then outlives it, so its cwd is meaningless and often invisible to the
-   * user. Callers that know better say so per request; everything else falls
-   * back to today's behaviour.
+   * user. HTTP callers must declare it per request; stdio retains the
+   * environment/cwd fallback.
    */
   workspaceDir?: string;
 }

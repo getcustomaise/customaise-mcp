@@ -9,6 +9,7 @@
 
 import { describe, it, mock } from 'node:test';
 import assert from 'node:assert/strict';
+import { currentRequestContext } from '../request-context.js';
 import { toStructuredError, installToolEnvelope, ERROR_TYPES } from '../tool-envelope.js';
 import {
   ERROR_CODE_AUTH_REQUIRED,
@@ -17,6 +18,14 @@ import {
 } from '../cap-state.js';
 
 describe('toStructuredError', () => {
+  it('includes save recovery IDs in text for clients that only show content', () => {
+    const r = toStructuredError({ message: 'Timed out', data: {
+      scriptId: 's1', operationId: 'op', outcome: 'unknown', recovery: 'Query save status'
+    } });
+    assert.match(r.content[0].text, /"scriptId":"s1"/);
+    assert.match(r.content[0].text, /"operationId":"op"/);
+    assert.match(r.content[0].text, /"outcome":"unknown"/);
+  });
   it('prefers the dispatch path\'s own data.type over the code map', () => {
     const r = toStructuredError({ code: -32030, message: 'gone', data: { type: 'extension_not_connected' } });
     assert.equal(r.structuredContent.error.type, 'extension_not_connected');
@@ -104,5 +113,17 @@ describe('installToolEnvelope', () => {
     (s as any).registerTool('t', {}, async () => ({ content: [{ type: 'text', text: 'ok' }] }));
     const out: any = await s._registered[0].handler({}, {});
     assert.equal(out.content[0].text, 'ok');
+  });
+
+  it('describes save progress as a save stage rather than a consent prompt', async () => {
+    const s = fakeServer(); const frames: any[] = [];
+    installToolEnvelope(s as any);
+    (s as any).registerTool('save', {}, async () => {
+      currentRequestContext().onPending?.({ reason: 'script_save:monaco_document_setup (op1)', expectedTimeoutMs: 70000 });
+      return { content: [] };
+    });
+    await s._registered[0].handler({}, { mcpReq: { _meta: { progressToken: 'token' }, notify: (frame: any) => frames.push(frame) } });
+    assert.match(frames[0].params.message, /monaco_document_setup/);
+    assert.doesNotMatch(frames[0].params.message, /user to approve/);
   });
 });

@@ -31,19 +31,11 @@ import { createBridge } from './bridge.js';
 import { FileWatcher } from './file-watcher.js';
 import { createServerFactory, PKG_VERSION } from './build-server.js';
 import { resolvePushTarget } from './push-target.js';
-import { withRequestContext } from './request-context.js';
+import { createDaemonHttpHandler } from './daemon-http.js';
+export { WORKSPACE_HEADER } from './daemon-http.js';
 
 export const DEFAULT_HTTP_PORT = 4051;
 export const TOKEN_HEADER = 'x-customaise-token';
-/**
- * Where the calling CLI is standing.
- *
- * The daemon was spawned once from whatever directory the first invocation
- * happened to be in and then outlived it, so its own cwd is meaningless.
- * Callers say where they are, per request.
- */
-export const WORKSPACE_HEADER = 'x-customaise-workspace';
-
 /** Where the daemon's token lives. Same resolution in the daemon and the CLI. */
 export function tokenPath(): string {
   const base = process.env.CUSTOMAISE_CONFIG_DIR
@@ -64,6 +56,8 @@ export interface DaemonRecord {
    * than with the process being asked about. Absent on an older daemon's record.
    */
   wsPort?: number;
+  /** Per-request URI encoding, including Unicode workspace paths. */
+  workspaceEncoding?: 'uri';
 }
 
 export function readDaemonRecord(): DaemonRecord | null {
@@ -161,65 +155,17 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<void> {
   const activeWorkspaces = new Map<string, number>();
 
   let lastActivity = Date.now();
-  // Fallback for a request that arrives without the workspace header, so a
-  // tool still resolves paths somewhere sensible. Pushes do NOT read this:
-  // they go through `pushTarget()`, which refuses to guess between several
-  // active workspaces. See `activeWorkspaces` above.
-  let lastWorkspace: string | undefined;
-
-  const server = http.createServer(async (req, res) => {
-    lastActivity = Date.now();
-    if (!tokenMatches(req.headers[TOKEN_HEADER], token)) {
-      res.writeHead(401, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ error: 'unauthorized' }));
-      return;
-    }
-    try {
-      const chunks: Buffer[] = [];
-      for await (const c of req) chunks.push(c as Buffer);
-      // Carry the client's disconnect through as an abort.
-      //
-      // Without this the whole cancellation path is dead on the door it was
-      // built for. A CLI that is Ctrl-C'd closes its socket, and if the
-      // `Request` handed to the handler has no signal, `ctx.mcpReq.signal`
-      // never fires, the dispatch runs to completion, and the consent modal
-      // it was waiting on stays open in the user's browser for its full five
-      // minutes with nobody coming back for the answer.
-      //
-      // `close` covers both a clean close and an abort; the `aborted` guard
-      // keeps a normally-completed request from signalling one.
-      const ac = new AbortController();
-      const onClientGone = () => { if (!res.writableEnded) ac.abort(); };
-      req.on('aborted', onClientGone);
-      res.on('close', onClientGone);
-
-      const request = new Request('http://127.0.0.1:' + port + (req.url ?? '/'), {
-        method: req.method,
-        headers: req.headers as Record<string, string>,
-        body: chunks.length ? Buffer.concat(chunks) : undefined,
-        signal: ac.signal,
-        // @ts-expect-error Node requires duplex for a streaming body
-        duplex: 'half',
-      });
-      // Attach the caller's workspace for the length of this request, and
-      // remember it for unsolicited pushes, which have no request to read.
-      const declared = req.headers[WORKSPACE_HEADER];
-      if (typeof declared === 'string' && declared) {
-        lastWorkspace = declared;
-        activeWorkspaces.set(declared, Date.now());
-      }
-
-      const out = await withRequestContext(
-        { workspaceDir: typeof declared === 'string' ? declared : lastWorkspace },
-        () => handler.fetch(request),
-      );
-      res.writeHead(out.status, Object.fromEntries(out.headers));
-      res.end(Buffer.from(await out.arrayBuffer()));
-    } catch (err: any) {
-      res.writeHead(500, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ error: err?.message || 'daemon error' }));
-    }
-  });
+  const server = http.createServer(createDaemonHttpHandler({
+    authorize: (req) => tokenMatches(req.headers[TOKEN_HEADER], token),
+    fetch: (request) => handler.fetch(request),
+    activeWorkspaces,
+    onActivity: () => { lastActivity = Date.now(); },
+  }));
+  // Also bound connections that have not finished their HTTP headers yet.
+  server.maxConnections = 64;
+  server.headersTimeout = 15_000;
+  server.requestTimeout = 30_000;
+  server.keepAliveTimeout = 5_000;
 
   let shuttingDown = false;
   let idleTimer: ReturnType<typeof setInterval> | null = null;
@@ -250,7 +196,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<void> {
     server.listen(port, '127.0.0.1', resolve);
   });
 
-  writeDaemonRecord({ token, port, pid: process.pid, version: PKG_VERSION, wsPort });
+  writeDaemonRecord({ token, port, pid: process.pid, version: PKG_VERSION, wsPort, workspaceEncoding: 'uri' });
   process.stderr.write(
     '[customaise-daemon] ' + PKG_VERSION + ' listening on 127.0.0.1:' + port +
     ' (bridge role=' + bridge.role + ')\n'
