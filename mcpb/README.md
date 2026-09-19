@@ -27,7 +27,7 @@ Everything runs in the browser session where you're already signed in. No API ke
 
 1. Install the [Customaise Chrome extension](https://customaise.com/install) from the Chrome Web Store.
 2. Sign in to Customaise. The extension is the full product; a Power User plan unlocks unlimited use of this MCP bridge.
-3. Open the Customaise side panel and enable the MCP bridge under Developer Tools.
+3. Open Customaise → Settings → MCP & Terminal and enable Agent Bridge.
 
 ## How to install this bundle
 
@@ -35,9 +35,11 @@ Everything runs in the browser session where you're already signed in. No API ke
 - Or drag the file into **Settings → Extensions** in Claude Desktop.
 - Or use **Settings → Extensions → Advanced settings → Install Extension** and pick the file.
 
-## Updating to 3.2.3
+## Updating to 3.2.4
 
-Install the matching 3.2.3 bundle and restart your MCP clients, including any running Customaise CLI daemon. Mixed relay versions reject requests instead of retrying indefinitely. Extension 1.3.4 provides the complete save-progress, cancellation and recovery behavior; older compatible extensions can still connect.
+Install this 3.2.4 bundle alongside extension 1.3.5 for the complete permission and subscription-verification fixes. Restart your MCP clients, including any running Customaise CLI daemon. A temporary verification failure now remains unknown instead of becoming a Free subscription; affected calls explain that verification can be retried. Confirmed subscription changes still apply normally.
+
+The 19 tools and relay protocol 2 are unchanged from 3.2.3. Older compatible extensions can still connect; save progress, cancellation and recovery require extension 1.3.4 or newer.
 
 ## How it talks to your browser
 

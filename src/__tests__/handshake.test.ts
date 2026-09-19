@@ -16,6 +16,8 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applyAck,
+  decideDispatch,
+  ERROR_CODE_ENTITLEMENT_UNAVAILABLE,
   applyInitSession,
   buildIntegrityReport,
   createPendingSession,
@@ -23,6 +25,18 @@ import {
 
 describe('cap-state — handshake', () => {
   describe('applyInitSession', () => {
+    it('unknown verification never becomes a Free cap and recovers on a verified plan', () => {
+      let session = applyInitSession(createPendingSession('s'), { session_id: 's', tier: 'unknown' });
+      assert.equal(session.mode, 'verifying');
+      const decision = decideDispatch(session, new Date());
+      assert.equal(decision.allow, false);
+      if (!decision.allow) assert.equal(decision.code, ERROR_CODE_ENTITLEMENT_UNAVAILABLE);
+      session = applyInitSession(session, { tier: 'power_user', unlimited: true });
+      assert.equal(decideDispatch(session, new Date()).allow, true);
+      session = applyInitSession(session, { tier: 'free', daily_cap: 1, current_used_daily: 1 });
+      assert.equal(decideDispatch(session, new Date()).allow, false);
+    });
+
     it('Power User payload (unlimited:true) → mode=unlimited, cap fields ignored', () => {
       let session = createPendingSession('s');
       session = applyInitSession(session, {

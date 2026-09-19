@@ -2,7 +2,7 @@
 
 MCP server and CLI that connect AI coding agents to the [Customaise](https://customaise.com) Chrome extension. Manage UserScripts, build AgentScripts, call WebMCP tools inside the user's signed-in browser session, select DOM elements visually, and drive tabs. Drive it over stdio from an IDE, or as a `customaise` command from a shell.
 
-**19 tools, 5 resources, WebSocket bridge** between your agent and a real Chrome session, whichever door it arrives through.
+**19 tools, 4 resources plus a script resource template, WebSocket bridge** between your agent and a real Chrome session, whichever door it arrives through.
 
 Two ways in. `customaise-mcp` is the MCP server an IDE spawns over stdio.
 `customaise` is a CLI for agents that have a shell instead, driving the same
@@ -149,9 +149,9 @@ Your agent can now read and edit UserScripts, build AgentScripts that expose Web
 |------|-------------|
 | `get_bridge_status` | Report extension attachment, plan tier, sign-in, and remaining daily and weekly quota. Costs no quota itself. |
 
-## Resources (5)
+## Resources (4 plus a template)
 
-Five resources any connected agent can read via `resources/read`. The two conventions handbooks define exactly how Customaise expects UserScripts and AgentScripts to be written. Agents should read the relevant handbook before touching a script.
+Four resources and one script resource template that connected agents can read via `resources/read`. The two conventions handbooks define exactly how Customaise expects UserScripts and AgentScripts to be written. Agents should read the relevant handbook before touching a script.
 
 | URI | Description |
 |-----|-------------|
@@ -160,6 +160,28 @@ Five resources any connected agent can read via `resources/read`. The two conven
 | `customaise://conventions` | Points at the right handbook for the script type you're working on |
 | `customaise://userscript-conventions` | Full UserScript reference: file structure, IIFE pattern, `GM_*` APIs, symbol-level editing, `@match` and `@namespace` rules |
 | `customaise://agentscript-conventions` | Full AgentScript reference: the `// ==AgentScript==` block, `// @webmcp <tool> <permission>` declarations, `navigator.modelContext.registerTool()`, consent model |
+
+## Updating to MCP/CLI 3.2.4 and extension 1.3.5
+
+Update both the extension and the companion for the complete permission and
+subscription-verification fixes. The npm package contains both `customaise-mcp`
+and the `customaise` CLI; Claude Desktop uses the matching 3.2.4 `.mcpb` bundle.
+Restart all MCP clients and any running Customaise CLI daemon after updating.
+The 19-tool surface and relay protocol 2 are unchanged from 3.2.3.
+
+A temporary account-verification failure is reported as `unknown`/`verifying`,
+not a confirmed Free subscription. Calls that cannot safely verify access fail
+with retryable `entitlement_unavailable` and do not consume Free quota. Wait for
+verification to recover before retrying; a genuine subscription change still
+applies normally. Tool actions are never replayed automatically. Structured
+permission refusal details and CLI exit codes survive leader/follower forwarding.
+
+Extension 1.3.5 also syncs explicit per-tool Allow/Prompt/Deny choices with each
+script. Update and finish syncing the browser holding those choices before
+removing its profile, and use the updated extension when restoring. Previously
+discarded local-only choices cannot be recovered from older cloud snapshots.
+Resetting a tool to its script default syncs too; older clients without this
+field do not erase the saved choices.
 
 ## Save deadlines and recovery (extension 1.3.4 / MCP 3.2.3)
 

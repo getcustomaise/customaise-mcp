@@ -30,6 +30,7 @@ export const WEEKLY_CAP = 150;
  * numbers (see tool-envelope.ts). They exist for logs and continuity, which
  * is why the new values keep the old last digits.
  */
+export const ERROR_CODE_ENTITLEMENT_UNAVAILABLE = -40034;
 export const ERROR_CODE_AUTH_REQUIRED = -40028;
 export const ERROR_CODE_CAP_EXCEEDED = -40029;
 export const ERROR_CODE_DISPATCH_TIMEOUT = -40030;
@@ -81,6 +82,7 @@ export function compareVersions(a: string, b: string): number {
  * on these.
  */
 export type SessionMode =
+  | 'verifying'      // extension has not yet verified the account plan
   | 'pending'        // bridge connected, awaiting init_session within grace period
   | 'unlimited'      // init_session arrived with unlimited:true (Power User / Trial)
   | 'capped'         // init_session arrived with cap fields (Free)
@@ -176,6 +178,10 @@ export function applyInitSession(
   if (typeof payload.install_id === 'string' && payload.install_id.length > 0) {
     next.installId = payload.install_id;
   }
+  if (payload.tier === 'unknown') {
+    next.mode = 'verifying';
+    return next;
+  }
   if (payload.unlimited === true || payload.tier === 'power_user' || payload.tier === 'trial') {
     next.mode = 'unlimited';
     return next;
@@ -240,13 +246,18 @@ export type CapDecision =
   | { allow: true }
   | {
       allow: false;
-      code: typeof ERROR_CODE_CAP_EXCEEDED | typeof ERROR_CODE_INTEGRITY_VIOLATION;
+      code: typeof ERROR_CODE_CAP_EXCEEDED | typeof ERROR_CODE_INTEGRITY_VIOLATION | typeof ERROR_CODE_ENTITLEMENT_UNAVAILABLE;
       scope: 'daily' | 'weekly' | 'session';
       message: string;
       data: Record<string, unknown>;
     };
 
 export function decideDispatch(session: CapSession, now: Date): CapDecision {
+  if (session.mode === 'verifying') {
+    return { allow: false, code: ERROR_CODE_ENTITLEMENT_UNAVAILABLE, scope: 'session',
+      message: 'Account verification is temporarily unavailable. Retry shortly; your plan has not been changed.',
+      data: { type: 'entitlement_unavailable', retryable: true } };
+  }
   if (session.mode === 'unlimited') {
     return { allow: true };
   }

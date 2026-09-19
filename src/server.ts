@@ -1375,7 +1375,7 @@ Multimodal \`content\` parts: \`[{ type: 'text', value: '...' }, { type: 'image'
 - \`initialPrompts\` — full \`[{role, content}]\` array; takes precedence over \`system\`.
 - \`temperature\` AND \`topK\` — sampling. **Both-or-neither**: Chrome rejects session-init if only one is provided. Out-of-range values (\`topK<1\`, \`temperature<0\`, \`temperature>maxTemperature\`) also reject as \`PROMPT_AI_BAD_INPUT\`. Pre-flight validated at the shim; you'll get the typed error rather than Chrome's misleading internal error. Read \`CM_promptAI.params()\` for defaults/limits.
 - \`expectedInputs\` / \`expectedOutputs\` — \`[{type: 'text'|'image'|'audio', languages?: ['en','ja',...]}]\`. Hint to Chrome for download-on-demand language packs; pass to \`availability()\` and \`prompt()\` with the same options.
-- \`timeoutMs\` — defaults 25000ms; hard cap 28000ms (MAIN_WORLD_BRIDGE 30s ceiling).
+- \`timeoutMs\` — defaults to the user’s Settings > Local Models > Gemini Nano limit (90000ms initially); per-call range 1000–240000ms.
 - \`signal\` — AbortSignal. Aborting cancels the SW-side generation immediately.
 
 ### Streaming (token-by-token)
@@ -1774,7 +1774,7 @@ const text = await CM_promptAI(input, options?);
 - \`system\` / \`initialPrompts\` — system message convenience OR full \`[{role, content}]\` seed array.
 - \`temperature\` AND \`topK\` — sampling. **Both-or-neither**; out-of-range values reject as \`PROMPT_AI_BAD_INPUT\`. Default via \`CM_promptAI.params()\`.
 - \`expectedInputs\` / \`expectedOutputs\` — \`[{type: 'text'|'image'|'audio', languages?: [...]}]\` language/modality hints.
-- \`timeoutMs\` — default 25000ms, hard cap 28000ms.
+- \`timeoutMs\` — uses the user’s Settings default (90000ms initially); override 1000–240000ms.
 - \`signal\` — AbortSignal.
 
 ### Streaming (token-by-token)

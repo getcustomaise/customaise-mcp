@@ -2,6 +2,17 @@
 
 All notable changes to `@customaise/mcp` will be documented in this file.
 
+## [3.2.4] - 2026-09-19
+
+### Fixed
+
+- Preserve unavailable subscription verification as an unknown/verifying state instead of applying Free caps. Calls return retryable `entitlement_unavailable` without consuming Free quota when verification cannot establish access. Confirmed subscription changes still take effect.
+- Propagate structured permission refusal diagnostics and CLI exit codes consistently across direct and follower connections.
+- Pin Zod to the tested lockfile version so fresh npm installations use the verified runtime dependency.
+- Keep the Claude Desktop bundle aligned with the tested MCP source. Pair MCP/CLI 3.2.4 with extension 1.3.5 for the complete permission and subscription recovery behavior. Restart MCP clients and the CLI daemon after updating.
+
+The tool surface and relay protocol are unchanged from 3.2.3. The extension also includes synced tool-permission choices, longer configurable Gemini Nano deadlines, and UI responsiveness fixes; those changes are extension-side.
+
 ## [3.2.3] - 2026-09-10
 
 More reliable script saves and CLI connections, with progress and recovery information when a request is interrupted.
