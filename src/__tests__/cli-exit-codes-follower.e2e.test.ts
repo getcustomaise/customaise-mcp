@@ -167,6 +167,17 @@ describe('exit codes survive the follower relay', () => {
     assert.equal(code, 7, stdout);
   });
 
+  it('preserves registration diagnostics through the follower without mislabelling a denial', async () => {
+    const details = { type: 'tool_registration_timeout', stage: 'main_world_probe',
+      probeOutcome: 'failed', probeErrorCode: 'main_world_probe_failed',
+      retryable: false, dispatchStarted: false, claimingScripts: [{ scriptId: 'reader', enabled: true }] };
+    nextAck = { success: false, error: 'Tool registration unavailable', error_data: details };
+    const { code, stdout } = await runCli(['tabs']);
+    assert.equal(code, 3, stdout);
+    const actual = JSON.parse(stdout).error;
+    for (const [key, value] of Object.entries(details)) assert.deepEqual(actual[key], value);
+  });
+
   it('not_found -> 8', async () => {
     nextAck = { success: false, error: 'No tab with id: 999999.', error_data: { type: 'not_found' } };
     const { code, stdout } = await runCli(['tabs']);

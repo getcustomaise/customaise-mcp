@@ -41,6 +41,13 @@ describe('exitCodeForErrorType', () => {
     assert.notEqual(exitCodeForErrorType('consent_denied'), exitCodeForErrorType('consent_timeout'));
   });
 
+  it('keeps permission resolution and registration faults distinct from owner denial', () => {
+    for (const type of ['permission_resolution_failed', 'tool_registration_timeout', 'tool_document_changed']) {
+      assert.equal(exitCodeForErrorType(type), EXIT.UNAVAILABLE);
+      assert.notEqual(exitCodeForErrorType(type), EXIT.DENIED);
+    }
+  });
+
   it('never returns 0 for an error type', () => {
     for (const t of ['auth_required','cap_exceeded','extension_not_connected',
                      'consent_denied','consent_timeout','integrity_violation','anything']) {

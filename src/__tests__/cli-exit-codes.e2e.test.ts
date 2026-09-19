@@ -301,6 +301,19 @@ describe('CLI exit codes, end to end', () => {
     assert.equal(JSON.parse(stdout).error.type, 'consent_timeout');
   });
 
+  it('preserves a permission failure decision through the real CLI and leader bridge', async () => {
+    const details = { type: 'permission_resolution_failed', reasonCode: 'script_storage_changed',
+      stage: 'storage_guard_capture', retryable: false, dispatchStarted: false,
+      decision: { scriptId: 'reader', workerBootId: 'test-worker', requestId: 'request-1', pendingWrites: 1 } };
+    nextAck = { success: false, error: 'Script write pending', error_data: details };
+    const { code, stdout } = await runCli(['tabs']);
+    assert.equal(code, 3, stdout);
+    assert.deepEqual(JSON.parse(stdout).error.decision, details.decision);
+    assert.equal(JSON.parse(stdout).error.reasonCode, details.reasonCode);
+    assert.equal(JSON.parse(stdout).error.retryable, false);
+    assert.equal(JSON.parse(stdout).error.dispatchStarted, false);
+  });
+
   it('exits 8 when the sanitization pipeline rejects a script', async () => {
     nextAck = {
       success: true,

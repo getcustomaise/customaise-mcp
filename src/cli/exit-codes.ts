@@ -57,6 +57,9 @@ export function exitCodeForErrorType(type: string | undefined): number {
     case 'leader_unreachable':
     case 'extension_unreachable':
     case 'extension_outdated':
+    case 'permission_resolution_failed':
+    case 'tool_registration_timeout':
+    case 'tool_document_changed':
     case 'dispatch_timeout':       return EXIT.UNAVAILABLE;
     // Emitted by the CLI itself for a payload-level `success: false`, so the
     // map has to know it: we publish this string in our own JSON, and a
