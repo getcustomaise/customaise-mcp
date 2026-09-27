@@ -81,6 +81,8 @@ export function compareVersions(a: string, b: string): number {
  * Semantic states for a session. The server-side cap behaviour branches
  * on these.
  */
+export interface AgentPermissionsSnapshot { mode: 'tool_permissions' | 'full_access'; revision: string; scope: 'browser_profile'; locked: boolean; }
+
 export type SessionMode =
   | 'verifying'      // extension has not yet verified the account plan
   | 'pending'        // bridge connected, awaiting init_session within grace period
@@ -115,6 +117,7 @@ export interface CapSession {
    */
   tier: string | null;
   remoteApprovals: boolean | null;
+  agentPermissions?: AgentPermissionsSnapshot | null;
   authenticated: boolean | null;
   /** Monotonic seq_num for outgoing dispatch_tool frames. Increments on every dispatch attempt. */
   nextSeqNum: number;
@@ -161,6 +164,7 @@ export function applyInitSession(
     tier?: string;
     unlimited?: boolean;
     remote_approvals?: boolean;
+    agent_permissions?: AgentPermissionsSnapshot | null;
     authenticated?: boolean;
     daily_cap?: number;
     weekly_cap?: number;
@@ -171,6 +175,10 @@ export function applyInitSession(
   const next: CapSession = { ...session };
   if (typeof payload.tier === 'string') next.tier = payload.tier;
   if (typeof payload.remote_approvals === 'boolean') next.remoteApprovals = payload.remote_approvals;
+  const access = payload.agent_permissions;
+  next.agentPermissions = access && ['tool_permissions', 'full_access'].includes(access.mode)
+    && typeof access.revision === 'string' && access.scope === 'browser_profile' && typeof access.locked === 'boolean'
+    ? { mode: access.mode, revision: access.revision, scope: access.scope, locked: access.locked } : null;
   if (typeof payload.authenticated === 'boolean') next.authenticated = payload.authenticated;
   if (typeof payload.session_id === 'string' && payload.session_id.length > 0) {
     next.sessionId = payload.session_id;

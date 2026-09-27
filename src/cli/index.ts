@@ -500,6 +500,7 @@ async function main(): Promise<void> {
         tier: known(s.tier),
         cap,
         remoteApprovals: known(s.remoteApprovals),
+        agentPermissions: s.agentPermissions ?? null,
         ...(s.saveStatus ? { saveStatus: s.saveStatus } : {}),
         ...(r?.isError ? { error: s.error ?? r.content } : {}),
         // The one switch that makes every script inert, and the reason this

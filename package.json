@@ -1,6 +1,6 @@
 {
   "name": "@customaise/mcp",
-  "version": "3.2.4",
+  "version": "3.2.5",
   "description": "MCP server and CLI bridging AI coding agents (Cursor, Claude Code, Codex, Windsurf, Kiro, Antigravity, Claude Desktop) to the Customaise Chrome extension. 19 tools: UserScripts, AgentScripts, WebMCP calls with HITL consent, visual DOM targeting, tab control. Drive it over stdio from an IDE, or as a `customaise` command from a shell.",
   "type": "module",
   "main": "dist/index.js",
@@ -78,5 +78,6 @@
   },
   "bugs": {
     "url": "https://github.com/getcustomaise/feedback/issues"
-  }
+  },
+  "bundleDependencies": true
 }

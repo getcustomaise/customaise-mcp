@@ -102,6 +102,7 @@ export interface BridgeSessionSnapshot {
   tier: string | null;
   authenticated: boolean | null;
   remoteApprovals: boolean | null;
+  agentPermissions?: import('./cap-state.js').AgentPermissionsSnapshot | null;
   capMode: string | null;
   dailyUsed: number | null;
   dailyCap: number | null;

@@ -930,6 +930,7 @@ export class ExtensionBridge implements Bridge {
       tier: s?.tier ?? null,
       authenticated: s?.authenticated ?? null,
       remoteApprovals: s?.remoteApprovals ?? null,
+      agentPermissions: s?.agentPermissions ?? null,
       capMode: s?.mode ?? null,
       // Counters are meaningless for an unlimited session; reporting zeros
       // there would read as "no usage" rather than "not applicable".

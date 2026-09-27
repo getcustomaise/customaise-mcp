@@ -2,6 +2,30 @@
 
 All notable changes to `@customaise/mcp` will be documented in this file.
 
+## [3.2.5] - 2026-09-27
+
+### Added
+
+- `get_bridge_status` and `customaise doctor` report the connected browser's
+  agent permission mode, revision, browser-profile scope and remote-only lock.
+  Direct and follower connections retain the same status. Missing information
+  from an older extension remains unknown rather than being reported as enabled.
+- Pair with extension **1.3.6** for its optional Full access mode, unified browser
+  controls and approval recovery fixes. Full access is selected by the user in
+  the extension; MCP and CLI cannot enable it. Denied, undeclared and ineligible
+  tools remain blocked, and Chrome DevTools access stays separate.
+
+### Fixed
+
+- Bundle the tested runtime dependencies in the npm tarball, so clean CLI
+  installs cannot silently select a newer MCP SDK or WebSocket dependency than
+  the verified Desktop bundle. Release CI checks the installed npm tarball as
+  well as the bundle.
+
+The 19-tool surface and relay protocol 2 are unchanged. The matching Claude
+Desktop bundle is **3.2.5**. Restart MCP clients and any resident CLI daemon after
+updating. This changelog describes the release candidate until publication.
+
 ## [3.2.4] - 2026-09-19
 
 ### Fixed
