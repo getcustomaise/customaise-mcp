@@ -144,10 +144,16 @@ try {
     writeFileSync(join(installDir, 'package.json'), '{"name":"customaise-release-proof","version":"1.0.0","private":true}\n');
     // Install from the tarball, including its resolved production dependencies.
     // No source-tree node_modules can satisfy an omitted packaged dependency.
-    run('npm', ['install', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', archive], { cwd: installDir });
+    // Isolate npm's metadata cache too: a replaced candidate at the same local
+    // tarball path must not inherit an earlier candidate's package metadata.
+    run('npm', ['install', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', '--cache', join(scratch, 'npm-cache'), archive], { cwd: installDir });
     const installed = join(installDir, 'node_modules', '@customaise', 'mcp');
     const installedPkg = JSON.parse(readFileSync(join(installed, 'package.json'), 'utf8'));
     assert.equal(installedPkg.version, pkg.version);
+    const bundled = installedPkg.bundleDependencies === true
+      ? Object.keys(installedPkg.dependencies) : installedPkg.bundleDependencies;
+    assert.deepEqual([...bundled].sort(), Object.keys(pkg.dependencies).sort(),
+      'published CLI must bundle every tested runtime dependency');
     const dist = join(installed, 'dist');
     verifyPayload(dist);
     const npmDependencies = verifyDependencies(join(installDir, 'node_modules'));

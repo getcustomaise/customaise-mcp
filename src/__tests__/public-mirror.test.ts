@@ -80,7 +80,7 @@ describe('public mirror plan', () => {
     // `package.json` alone leaves a scanner resolving ranges itself and
     // reporting whatever the range could resolve to rather than what we
     // pin. The live mirror carries no lockfile at all today.
-    assert.ok(included.has('package-lock.json'), 'package-lock.json would not be published');
+    assert.ok(included.has('package-lock.json'), 'the publishable dependency lock would not be mirrored');
   });
 
   it('does not ship the test residue the suite writes into the repo', () => {

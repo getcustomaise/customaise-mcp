@@ -147,7 +147,7 @@ Your agent can now read and edit UserScripts, build AgentScripts that expose Web
 ### Diagnostics
 | Tool | Description |
 |------|-------------|
-| `get_bridge_status` | Report extension attachment, plan tier, sign-in, and remaining daily and weekly quota. Costs no quota itself. |
+| `get_bridge_status` | Report extension attachment, plan tier, sign-in, remaining quota and the browser's agent permission mode when supported. Costs no quota itself. |
 
 ## Resources (4 plus a template)
 
@@ -161,13 +161,34 @@ Four resources and one script resource template that connected agents can read v
 | `customaise://userscript-conventions` | Full UserScript reference: file structure, IIFE pattern, `GM_*` APIs, symbol-level editing, `@match` and `@namespace` rules |
 | `customaise://agentscript-conventions` | Full AgentScript reference: the `// ==AgentScript==` block, `// @webmcp <tool> <permission>` declarations, `navigator.modelContext.registerTool()`, consent model |
 
-## Updating to MCP/CLI 3.2.4 and extension 1.3.5
+## Updating to MCP/CLI 3.2.5 and extension 1.3.6
 
-Update both the extension and the companion for the complete permission and
-subscription-verification fixes. The npm package contains both `customaise-mcp`
-and the `customaise` CLI; Claude Desktop uses the matching 3.2.4 `.mcpb` bundle.
+The CLI and Desktop bundle ship the same tested runtime dependencies. Runtime
+dependencies are bundled in the npm tarball so fresh installs retain those
+versions. Contributors should use `npm ci`; dependency updates belong in
+`package-lock.json` and must pass the packaged-release checks before publication.
+
+Update both the extension and the companion for the latest permission controls
+and status reporting. The npm package contains both `customaise-mcp`
+and the `customaise` CLI; Claude Desktop uses the matching 3.2.5 `.mcpb` bundle.
 Restart all MCP clients and any running Customaise CLI daemon after updating.
 The 19-tool surface and relay protocol 2 are unchanged from 3.2.3.
+
+In extension 1.3.6, Settings → Agent permissions offers **Use tool permissions**
+(the default) and **Full access**. A user-confirmed Full access grant lets eligible
+Prompt tools run without repeated Customaise approvals in that browser profile,
+including new and updated tools. Saved Deny rules, undeclared tools, disabled
+scripts and URL restrictions still apply. Saved per-tool choices are preserved;
+turning Full access off restores them. The grant stays on until disabled or the
+user signs out, is not synced, and does not enable Chrome DevTools access.
+Browsers configured to accept approvals only from another device cannot enable
+Full access locally.
+
+`get_bridge_status` and `customaise doctor` expose `agentPermissions` with
+`mode`, `revision`, `scope` and `locked`. Older extensions may return no status.
+There is no MCP/CLI command to grant Full access: the user controls it in the
+extension. The interactive bottom bar exposes active permissions, DevTools,
+bridge and sync controls; Appearance can keep them visible while off as well.
 
 A temporary account-verification failure is reported as `unknown`/`verifying`,
 not a confirmed Free subscription. Calls that cannot safely verify access fail
@@ -214,10 +235,10 @@ unchanged; the full save contract requires extension 1.3.4.
 AgentScripts register tools on web pages via `navigator.modelContext.registerTool(...)`. Each tool is declared in the AgentScript's `// @webmcp <toolName> <permission>` header with one of three permissions:
 
 - **`allow`**: tool executes immediately. ~50 to 100ms round-trip per call (the extension still runs permission checks).
-- **`prompt`**: every call surfaces an in-browser consent modal and blocks until the user approves or denies. Up to **5 minutes**. Design for this. Don't chain prompt-gated calls in tight loops, and treat a long `call_webmcp_tool` as normal.
+- **`prompt`**: in the default tool-permissions mode, each call surfaces an in-browser consent modal and blocks until the user approves or denies. User-enabled Full access in extension 1.3.6 lets eligible Prompt tools run without that modal; Deny rules and separate DevTools requirements still apply. Up to **5 minutes**. Design for this. Don't chain prompt-gated calls in tight loops, and treat a long `call_webmcp_tool` as normal.
 - **`deny`**: tool is suppressed and calls fail immediately.
 
-"Always allow" and "Always deny" buttons on the consent modal persist the decision per-script per-tool until the user resets it in extension Settings. These overrides live in `chrome.storage.local` on the user's device; the MCP server has no visibility into them.
+"Always allow" and "Always deny" buttons on the consent modal persist the decision per-script per-tool until the user resets it in extension Settings. These overrides are stored with the script and included in encrypted sync when enabled. The extension evaluates them for each call; MCP cannot set them or grant itself Full access.
 
 ### Remote approvals (optional)
 
@@ -416,9 +437,9 @@ The MCP server listens on `ws://localhost:4050` in plaintext on your loopback in
 
 **What this does NOT stop**: a malicious native process running as your user. Node's `ws` client (and most HTTP libraries) lets callers forge any Origin header. If you can't trust processes running as your OS user, the threat model is already broader than this bridge.
 
-**Defense in depth**: every `prompt`-permissioned tool still requires your explicit approval in the Customaise consent modal before running.
+**Approval modes**: tools whose effective permission remains `prompt` require your approval in the Customaise consent modal. The default mode follows saved tool rules. A user-enabled Full access grant can allow eligible Prompt tools in this browser profile, including new and updated tools, while saved Deny rules stay blocked.
 
-Tools declared `allow` run without asking, with one exception that matters here: **a script written through this bridge or the `customaise` CLI does not get to grant itself `allow`.** Its self-declared `allow` resolves as `prompt`, so the first call shows you what the agent built. Choosing "Always allow" stores an override and it never prompts again. The MCP tool API cannot resolve the consent modal. Remote approvals route prompts away from the requesting browser, but the backend authenticates the signed-in account and accepts a client-supplied device claim; this is not proof of a separate human or physical device. An agent with account credentials or full OS access needs independent account/OS access restrictions.
+Tools declared `allow` run without asking, with one exception that matters here: **a script written through this bridge or the `customaise` CLI does not get to grant itself `allow`.** Its self-declared `allow` resolves as `prompt` in the default mode. A saved user Allow override or a user-enabled Full access grant can permit the call without prompting; the script cannot create either grant itself. Choosing "Always allow" stores an override and it never prompts again. The MCP tool API cannot resolve the consent modal. Remote approvals route prompts away from the requesting browser, but the backend authenticates the signed-in account and accepts a client-supplied device claim; this is not proof of a separate human or physical device. An agent with account credentials or full OS access needs independent account/OS access restrictions.
 
 Scripts you wrote yourself, and scripts you subscribed to from the marketplace, are unaffected: `allow` means `allow`. For marketplace scripts that means the old advice still holds, so only subscribe to AgentScripts from sources you trust.
 
