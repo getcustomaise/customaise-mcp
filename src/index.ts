@@ -3,7 +3,7 @@
 /**
  * Customaise MCP Server — stdio entry point.
  *
- * Connects AI coding agents (Cursor, Claude Code, Codex, Windsurf, Kiro,
+ * Connects AI coding agents (Cursor, Claude Code, Codex, Kiro,
  * Antigravity) to the Customaise Chrome extension.
  *
  * Transport:

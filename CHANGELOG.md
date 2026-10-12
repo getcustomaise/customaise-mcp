@@ -2,6 +2,17 @@
 
 All notable changes to `@customaise/mcp` will be documented in this file.
 
+## [3.2.6] - 2026-10-11
+
+- Update the bundled MCP client dependency to 2.2.0 for GHSA-6qxp-vccf-f47h. The advisory concerns OAuth clients; Customaise uses local stdio/bearer connections, and still ships the patched dependency.
+- Correct Chrome permission guidance: current Chrome requires Allow user scripts per extension, for store and unpacked installs. The CLI and Chrome must be on the same computer for the localhost bridge.
+- Clarify how to write AgentScripts that agents can edit function by function: prefer named top-level functions and registration; IIFEs are also supported.
+- Add `customaise://script-decisions`, also available through `customaise resource script-decisions`: metadata, the `CM_decisions` API, a working UserScript, AgentScript integration, device/provider setup, billing and bounded failure handling.
+- Link the guide from both scripting handbooks, the conventions directory and the `customaise init` primer. The existing 19 tools and approval rules are unchanged; MCP/CLI cannot select a paid provider or authorise a device.
+- Add copyable CLI and Grok Bot setup prompts to the extension, with a reference explaining each browser tool.
+- Explain extension 1.3.7 sharing in both scripting handbooks and the CLI primer: Publish & share keeps subscriptions; Send creates a 24-hour link to an independent editable copy. Cover disabled receipt, source review, expiry and the fact that saved provider choices and approvals are not copied. The 19-tool surface is unchanged; there is no MCP/CLI Send or Publish command.
+- Pair with extension **1.3.7** and the matching **3.2.6** Claude Desktop bundle. Script Decisions requires Power User, saved provider keys, device access and each script's provider selection.
+
 ## [3.2.5] - 2026-09-27
 
 ### Added

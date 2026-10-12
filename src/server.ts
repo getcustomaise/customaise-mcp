@@ -1,3 +1,4 @@
+import { SCRIPT_DECISIONS_CONVENTIONS } from './script-decisions-guide.js';
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
 import { z } from 'zod';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
@@ -7,7 +8,7 @@ import { tmpdir, homedir } from 'node:os';
 
 /**
  * Resolve a writable workspace directory for context files.
- * - Cursor/Windsurf: cwd is the project root (ideal)
+ * - Cursor: cwd is the project root (ideal)
  * - Claude Desktop: cwd is homedir (fine)
  * - Antigravity: cwd is '/' → falls back to homedir
  */
@@ -107,9 +108,8 @@ export function registerTools(
 ): void {
 
   // ─── Master-gate detection (Round-33 follow-up) ─────────────────────
-  // The "Allow user scripts" toggle on chrome://extensions resets on every
-  // Chrome restart (Chromium design — security gate for chrome.userScripts
-  // API access). When off, every UserScript and AgentScript is snoozed
+  // The per-extension "Allow user scripts" permission controls access to
+  // chrome.userScripts on current Chrome. When off, UserScripts and AgentScripts are snoozed
   // globally, zero tools register on any tab, and the agent investigating
   // "why no tools" typically spends N tool calls poking at the page before
   // it discovers the gate. This helper queries the SW's SystemStatusService
@@ -123,13 +123,11 @@ export function registerTools(
     `╚════════════════════════════════════════════════════════════════════╝\n` +
     `\n` +
     `The "Allow user scripts" master toggle on chrome://extensions is OFF.\n` +
-    `This toggle resets on every Chrome restart and silently disables every\n` +
-    `UserScript and AgentScript globally — including the test rig you just\n` +
-    `installed. Zero tools will register on any tab until it's re-enabled.\n` +
+    `Enable this per-extension permission to allow installed scripts to run.\n` +
     `\n` +
-    `TELL THE USER: open chrome://extensions, enable "Developer mode" (top-\n` +
-    `right toggle), find the Customaise card, and toggle "Allow user scripts"\n` +
-    `ON. Then reload the target tab. The scripts will wake up automatically.\n` +
+    `TELL THE USER: open chrome://extensions, open Customaise Details,\n` +
+    `and enable "Allow user scripts" for the extension.\n` +
+    `Then reload the target tab. Developer mode is needed for unpacked installs.\n` +
     `\n` +
     `(The structured response below is included for reference; until the\n` +
     `toggle is on it will report 0 active tools regardless of script state.)\n` +
@@ -157,8 +155,7 @@ export function registerTools(
    * The CLI parses `structuredContent`, deliberately kept as clean JSON, so a
    * terminal agent got total silence in exactly the situation the banner
    * exists for: scripts install fine, no tool ever registers, and nothing
-   * anywhere says the "Allow user scripts" toggle is off. That toggle resets
-   * on every Chrome restart, so it is not an edge case.
+   * anywhere says the "Allow user scripts" permission is off.
    *
    * A separate field rather than prose prepended to the JSON, because
    * prepending is what broke `JSON.parse` and made the CLI emit the whole
@@ -289,7 +286,7 @@ IMPORTANT: Save files inside your current workspace or project directory (e.g., 
   server.registerTool('export_script', { description: `Export a script from a local file into Customaise. The file will be validated through Customaise's sanitization pipeline (syntax checking, AST validation, security analysis). If valid, the script is installed and ready to execute on matching pages. If invalid, detailed diagnostics explain exactly what to fix. Pass scriptId to update an existing script instead of creating a new one. Pass expectedCodeHash from import_script to reject stale edits. Save progress includes an operation ID and stage. A timeout may leave the outcome unknown: query get_bridge_status with the scriptId and operationId from the error before retrying. The extension enforces a 90-second save deadline and cancels work that has not reached persistence. A storage write already submitted cannot be recalled; its commit receipt resolves that uncertainty. NOTE: You cannot overwrite a shared/subscribed script — they are read-only. If you need to edit a shared script, first call import_script with fork:true (creates an editable independent copy), then export to that copy's scriptId.
 
     Reminder for UserScripts: Must use an IIFE with named functions for symbol-level editing, \`// @namespace https://customaise.com\`, and standard directives (@name, @match, @grant).
-    Reminder for AgentScripts: MUST use \`// ==AgentScript==\` block, MUST explicitly declare tools via \`// @webmcp <toolName> <permission>\` (e.g. \`// @webmcp my_tool prompt\`). Permissions: allow (autonomous), prompt (interactive), deny (blocked). Prefer \`prompt\`: in a script you write, \`allow\` resolves as \`prompt\` before user grants are applied; a saved Allow rule or user-enabled Full access can permit it. Must NOT use IIFEs. CAN use GM_* APIs for persistence, networking, and observability alongside \`navigator.modelContext.registerTool()\`.`, inputSchema: z.object({
+    Reminder for AgentScripts: MUST use \`// ==AgentScript==\` block, MUST explicitly declare tools via \`// @webmcp <toolName> <permission>\` (e.g. \`// @webmcp my_tool prompt\`). Permissions: allow (autonomous), prompt (interactive), deny (blocked). Prefer \`prompt\`: in a script you write, \`allow\` resolves as \`prompt\` before user grants are applied; a saved Allow rule or user-enabled Full access can permit it. Prefer named top-level functions and top-level tool registration for symbol editing; IIFEs are supported. CAN use GM_* APIs for persistence, networking, and observability alongside \`navigator.modelContext.registerTool()\`.`, inputSchema: z.object({
               filePath: z.string().describe('Local file path containing the userscript source code'),
               scriptId: z.string().optional().describe('ID of an existing script to update. Omit to create a new script.'),
               expectedCodeHash: z.string().regex(/^[a-f0-9]{64}$/).optional().describe('SHA-256 from import_script. Reject the save if the installed source has changed since that read.')
@@ -1231,7 +1228,7 @@ export function registerPromptsAndResources(server: McpServer, bridge: Bridge): 
         contents: [{
           uri: uri.href,
           mimeType: 'text/markdown',
-          text: '> **Directory Redirect**\n> \n> Customaise supports two script paradigms with distinct architectures.\n> \n> - For traditional DOM manipulation, read `customaise://userscript-conventions`\n> - For WebMCP tool injection, read `customaise://agentscript-conventions`'
+          text: '> **Directory Redirect**\n> \n> Customaise supports two script paradigms with distinct architectures.\n> \n> - For traditional DOM manipulation, read `customaise://userscript-conventions`\n> - For WebMCP tool injection, read `customaise://agentscript-conventions`\n> - For paid typed decisions inside either script type, read `customaise://script-decisions`'
         }]
       };
     }
@@ -1259,6 +1256,17 @@ export function registerPromptsAndResources(server: McpServer, bridge: Bridge): 
   );
 
   server.registerResource(
+    'script-decisions',
+    'customaise://script-decisions',
+    {
+      description: 'Script Decisions: metadata, CM_decisions API, working example, setup, billing and safe failure handling for both script engines.',
+      mimeType: 'text/markdown',
+      cacheHint: { ttlMs: 60 * 60 * 1000 }
+    },
+    async (uri) => ({ contents: [{ uri: uri.href, mimeType: 'text/markdown', text: SCRIPT_DECISIONS_CONVENTIONS }] })
+  );
+
+  server.registerResource(
     'agentscript-conventions',
     'customaise://agentscript-conventions',
     {
@@ -1281,7 +1289,20 @@ export function registerPromptsAndResources(server: McpServer, bridge: Bridge): 
 }
 
 
+const SCRIPT_SHARING_CONVENTIONS = `## Sharing and independent copies (extension 1.3.7)
+
+The user opens Quick Actions → Share Script in the extension. Publish & share creates a hosted, read-only subscription with publisher updates. Send creates a 24-hour link to an independent editable copy; sending requires Power User, while a free signed-in account can receive it. MCP/CLI has no Send or Publish tool: do not invent commands or bypass the extension controls.
+
+Received copies start disabled, keep their own edits and saved selectors, and receive no publisher updates. Reinstalling the same Send link does not overwrite edits or re-enable the copy. Link expiry or Stop this send blocks future access but cannot recall installed copies. Refresh replaces the active link's snapshot with the current saved script and resets its 24-hour deadline; opening or copying the URL does not refresh it.
+
+Anyone with the active link can preview its source. Review source and saved selectors for secrets before sharing. Saved account keys, browser logins, GM values, tool approvals and Script Decisions provider choices are not copied; credentials written into source remain included. Recipients configure their own required grants, device access and paid provider. Fork a read-only subscription before editing or sending an independent copy. Shared means a subscription in list_scripts; a received Send copy is an owned local script.
+`;
+
 const USERSCRIPT_CONVENTIONS = `# Customaise UserScripts
+
+For paid typed decisions inside this script, read customaise://script-decisions before writing code. It covers @grant CM_decisions, @decisions metadata, device/provider setup and bounded failure handling.
+
+${SCRIPT_SHARING_CONVENTIONS}
 
 ## File Format & Structure
 Every userscript is a single \`.user.js\` file with a metadata block at the top. 
@@ -1624,23 +1645,27 @@ Customaise supports 26 \`GM_*\` APIs (full list canonical in \`extension/src/bac
 
 const AGENTSCRIPT_CONVENTIONS = `# Customaise AgentScripts
 
+For paid typed decisions inside this script, read customaise://script-decisions before writing code. It covers @grant CM_decisions, @decisions metadata, device/provider setup and bounded failure handling.
+
+${SCRIPT_SHARING_CONVENTIONS}
+
 AgentScripts inject WebMCP tools onto any web page via \`navigator.modelContext\`.
 
 ## Setup & environment
 
 **No Chrome flag required.** Customaise ships a polyfill of \`navigator.modelContext\` that runs on stable Chromium today. The Chrome \`#enable-webmcp-testing\` flag is OPTIONAL — it only matters if the user wants third-party WebMCP-spec inspector tools to introspect Customaise's tool registry. The Customaise stack itself (the in-extension AI, the Agent Bridge, every \`@webmcp\`-declared tool) works flag-off.
 
-**The "two sides" mental model.** Customaise is split across two sides, and they are rarely on the same machine:
+**The "two sides" mental model.** Customaise has a browser side and an agent side. The daemon and Chrome must run on the same computer because the bridge uses localhost:
 - **The hands: the user's daily Chrome** (or Edge / Brave / any Chromium). Where Customaise is installed, where the user is signed in to the target sites (bank, CRM, internal Jira, etc.), and where AgentScripts inject.
-- **The brain: wherever you happen to be running.** An editor with an MCP client (Cursor, Claude Code, Windsurf, etc.), or a bare shell with no MCP client at all, reaching the same control surface through the \`customaise\` CLI. It makes no difference to the script you write. If you are inside an editor, its built-in browser is NOT where Customaise should run.
+- **The brain: wherever you happen to be running.** An editor with an MCP client (Cursor, Claude Code, etc.), or a bare shell with no MCP client at all, reaching the same control surface through the \`customaise\` CLI. It makes no difference to the script you write. If you are inside an editor, its built-in browser is NOT where Customaise should run.
 
-The two sides meet over a WebSocket on \`localhost:4050\`, served by the Customaise daemon. An MCP client spawns that daemon for you; from a shell, your first \`customaise\` command spawns it. Either way, the agent never sees the user's cookies or auth tokens: it calls registered tools, and the tools execute inside the user's already-authenticated session. This split is what unlocks "Bring Your Own Session" automation: any web app the user is already logged into becomes addressable, with no API keys, no OAuth dance, no scraping.
+The two sides meet over a WebSocket on \`localhost:4050\`, served by the Customaise daemon. An MCP client spawns that daemon for you; from a shell, your first \`customaise\` command spawns it. Tools execute in the existing signed-in browser session; do not copy its cookies or authentication tokens. A remote agent such as Grok Bot runs the CLI and Chrome together on its own computer. The bridge does not connect its localhost to the user's laptop, and site access restrictions still apply.
 
 **Prerequisites for the user (one-time).** They need:
 1. Customaise extension installed (Web Store or unpacked).
-2. If unpacked: \`chrome://extensions\` → Developer mode ON, plus the "Allow user scripts" toggle on Customaise's card.
-3. The global AgentScripts toggle in Customaise Settings → Script Management → ON. (Without this, every AgentScript is unregistered globally regardless of per-script enable state.)
-4. Whatever site they want to automate, opened and signed in normally.
+2. In current Chrome (138+), open Customaise’s Details at \`chrome://extensions\` and enable "Allow user scripts", for store and unpacked installs alike. Developer mode is additionally needed to load an unpacked extension.
+3. Enable the intended AgentScript in Customaise’s Scripts panel. The AgentScripts tab filters the list; each script has its own enable switch.
+4. Open the matching site and sign in normally. Reload that page after installing or changing an AgentScript so its tools register.
 
 ## Format Requirements
 1. MUST use the \`// ==AgentScript==\` metadata block (NOT UserScript).
@@ -2062,9 +2087,9 @@ Once your action tool works, \`delete_script\` the inspector. Or move its tools 
 
 ## Troubleshooting — \`list_webmcp_tools\` returns empty after reload
 Walk these in order. Most common cause first:
-1. **Global AgentScripts gate is OFF.** Customaise has a master toggle in Settings → Script Management. If off, every AgentScript is unregistered globally, regardless of per-script enable state. Ask the user to enable it once (per browser profile).
+1. **Chrome's Allow user scripts setting is off.** Run \`customaise doctor\` to check it. If disabled, the user must enable "Allow user scripts" in Customaise's Details at \`chrome://extensions\`. There is no separate global AgentScripts switch in Customaise Settings.
 2. **\`@match\` doesn't actually match the URL.** Verify with \`list_tabs\` then compare the URL against your \`@match\` patterns. \`https://demo.example.com/*\` doesn't match \`http://...\` or a different subdomain.
-3. **The script is per-script-disabled.** Even with the global gate on, the per-script toggle in Customaise's Script Management UI must be on. \`list_scripts\` shows the \`enabled\` boolean.
+3. **The intended script is disabled.** Its own switch in Customaise's Scripts panel must be on. \`list_scripts\` shows the \`enabled\` boolean; the AgentScripts tab only filters the list.
 4. **Tab wasn't reloaded after export.** Manifest content scripts re-inject only on navigation. Call \`reload_tab\` explicitly.
 5. **Script body threw before \`registerTool\` ran.** Use \`get_console_context\` on the tab to look for early errors. Nothing after the throw runs, so your tools never registered.
 6. **\`@webmcp\` declarations are malformed and were silently stripped at parse time.** Re-read the \`webmcp[]\` field in the \`export_script\` response — if it's empty but you intended grants, fix the directive syntax (\`<toolName> <allow|prompt|deny>\`, single space, no extra tokens).

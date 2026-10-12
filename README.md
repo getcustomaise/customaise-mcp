@@ -2,7 +2,7 @@
 
 MCP server and CLI that connect AI coding agents to the [Customaise](https://customaise.com) Chrome extension. Manage UserScripts, build AgentScripts, call WebMCP tools inside the user's signed-in browser session, select DOM elements visually, and drive tabs. Drive it over stdio from an IDE, or as a `customaise` command from a shell.
 
-**19 tools, 4 resources plus a script resource template, WebSocket bridge** between your agent and a real Chrome session, whichever door it arrives through.
+**19 tools, 5 resources plus a script resource template, WebSocket bridge** between your agent and a real Chrome session, whichever door it arrives through.
 
 Two ways in. `customaise-mcp` is the MCP server an IDE spawns over stdio.
 `customaise` is a CLI for agents that have a shell instead, driving the same
@@ -43,18 +43,6 @@ claude mcp add customaise -- npx -y @customaise/mcp
 ```
 
 **Claude Desktop** (`claude_desktop_config.json`):
-```json
-{
-  "mcpServers": {
-    "customaise": {
-      "command": "npx",
-      "args": ["-y", "@customaise/mcp"]
-    }
-  }
-}
-```
-
-**Windsurf** (`.windsurf/mcp.json`):
 ```json
 {
   "mcpServers": {
@@ -149,9 +137,9 @@ Your agent can now read and edit UserScripts, build AgentScripts that expose Web
 |------|-------------|
 | `get_bridge_status` | Report extension attachment, plan tier, sign-in, remaining quota and the browser's agent permission mode when supported. Costs no quota itself. |
 
-## Resources (4 plus a template)
+## Resources (5 plus a template)
 
-Four resources and one script resource template that connected agents can read via `resources/read`. The two conventions handbooks define exactly how Customaise expects UserScripts and AgentScripts to be written. Agents should read the relevant handbook before touching a script.
+Five resources and one script resource template that connected agents can read via `resources/read`. The two conventions handbooks define exactly how Customaise expects UserScripts and AgentScripts to be written. Agents should read the relevant handbook before touching a script.
 
 | URI | Description |
 |-----|-------------|
@@ -160,8 +148,48 @@ Four resources and one script resource template that connected agents can read v
 | `customaise://conventions` | Points at the right handbook for the script type you're working on |
 | `customaise://userscript-conventions` | Full UserScript reference: file structure, IIFE pattern, `GM_*` APIs, symbol-level editing, `@match` and `@namespace` rules |
 | `customaise://agentscript-conventions` | Full AgentScript reference: the `// ==AgentScript==` block, `// @webmcp <tool> <permission>` declarations, `navigator.modelContext.registerTool()`, consent model |
+| `customaise://script-decisions` | Shared UserScript/AgentScript guide: typed questions, metadata, CM_decisions API, working example, device/provider setup, billing and failure handling |
 
-## Updating to MCP/CLI 3.2.5 and extension 1.3.6
+## Script Decisions in UserScripts and AgentScripts
+
+Extension **1.3.7** and MCP/CLI **3.2.6** include the authoring guide and example.
+Script Decisions is a **Power User capability**, available with extension 1.3.7 and later.
+Read `customaise://script-decisions` over MCP or run:
+
+```sh
+customaise resource script-decisions
+```
+
+Use it for bounded text classification, relevance checks and scoring; use ordinary
+code for extraction, exact rules and actions. Both script engines declare
+`@grant CM_decisions` plus one valid `@decisions` JSON object, then use
+`CM_decisions.run`, `status` and `cancel`. The resource contains a complete
+UserScript and instructions for wrapping the same helper in an AgentScript tool.
+
+The user saves separate Jev/Decisions API keys on `/account#script-decisions`,
+enables the device in **Your Devices**, and selects a provider in the script's
+**Quick Actions → Script Decisions**. Requests then run automatically. Settings
+can pause the device without losing selections; Data & Analytics reports usage
+by device/provider. Provider charges and budgets are separate from Customaise
+browser AI tokens. MCP/CLI cannot set these protected permissions or supply keys.
+WebMCP approval still applies independently to the containing tool.
+
+Poll the same operation ID with a bounded wait. Preserve refusals and unknown
+outcomes; do not resubmit uncertain paid work under a new key or switch providers
+automatically. Code/metadata changes can require provider reselection. See the
+[Script Decisions guide](https://customaise.com/learn/script-decisions).
+
+### Let an agent set up the CLI
+
+In extension **Settings → MCP & Terminal → Quick Setup → Terminal**, copy the
+setup prompt for Codex, Claude Code or another shell agent. The **Grok Bot** tab
+has a prompt for installing the CLI on the Bot's own computer. Both prompts
+verify Node.js, install the current published package, run `doctor`, add the
+project primer with `init`, and read the conventions before script work.
+The [CLI guide](https://customaise.com/learn/cli) and
+[Grok Bot guide](https://customaise.com/learn/grok-bot) provide the same prompts.
+
+## Updating to MCP/CLI 3.2.6 and extension 1.3.7
 
 The CLI and Desktop bundle ship the same tested runtime dependencies. Runtime
 dependencies are bundled in the npm tarball so fresh installs retain those
@@ -170,7 +198,7 @@ versions. Contributors should use `npm ci`; dependency updates belong in
 
 Update both the extension and the companion for the latest permission controls
 and status reporting. The npm package contains both `customaise-mcp`
-and the `customaise` CLI; Claude Desktop uses the matching 3.2.5 `.mcpb` bundle.
+and the `customaise` CLI; Claude Desktop uses the matching 3.2.6 `.mcpb` bundle.
 Restart all MCP clients and any running Customaise CLI daemon after updating.
 The 19-tool surface and relay protocol 2 are unchanged from 3.2.3.
 
@@ -264,7 +292,7 @@ Users can visually select elements in the browser, and the extension pushes cont
 
 > [!NOTE]
 > **Where are the files saved?**
-> The MCP server writes `.customaise/` to its current working directory (usually your project root in Cursor or Windsurf).
+> The MCP server writes `.customaise/` to its current working directory (usually your project root in Cursor).
 > If you are using a global IDE like Claude Desktop, it defaults to your home directory (`~/.customaise/`). To force a specific project folder, set `CUSTOMAISE_WORKSPACE` in your MCP config:
 >
 > ```json
@@ -447,6 +475,26 @@ Scripts you wrote yourself, and scripts you subscribed to from the marketplace, 
 
 ## CLI
 
+### Share scripts through the extension
+
+In extension **1.3.7**, open **Quick Actions → Share Script** on an owned
+UserScript or AgentScript. **Publish & share** keeps the hosted, read-only
+subscription flow with publisher updates. **Send** creates a **24-hour link**
+to an independent editable copy. Sending requires Power User; receiving works
+with a free signed-in account. There is no MCP/CLI Send or Publish command.
+
+Send copies start disabled, keep their own edits and saved selectors, and
+remain after link expiry or **Stop this send**, without publisher updates.
+**Refresh link for 24 hours** replaces the active snapshot with the current
+saved script; merely opening or copying a URL does not extend its deadline.
+Anyone with the active link can preview source. Review source and selectors
+before sending: secrets embedded there remain included. Saved account keys,
+GM values, browser logins, tool approvals and Script Decisions provider choices
+are not copied. Each recipient configures their own access and provider.
+Fork a subscription before modifying or sending an independent copy.
+
+### Terminal setup
+
 For an agent with a terminal rather than an MCP client.
 
 ```sh
@@ -599,7 +647,7 @@ When the cap fires, the server returns a JSON-RPC error with code `-40029` and a
 - Expected when the user denied the modal, the 5-minute budget expired, or a previous "Always deny" override was set on that tool. The user can reset per-tool overrides in extension Settings.
 
 **`list_webmcp_tools` returns empty after a reload**
-- Walk the conventions handbook's troubleshooting checklist. Most common: the global AgentScripts toggle in Customaise Settings is off, or the `@match` pattern doesn't cover the URL. See `customaise://agentscript-conventions` for the full list.
+- Walk the conventions handbook's troubleshooting checklist. Check Chrome's **Allow user scripts** setting with `customaise doctor`, the intended script's enable switch in **Scripts**, and whether its `@match` covers the URL. Reload the page after installing or changing the script. See `customaise://agentscript-conventions` for the full list.
 
 ## License
 

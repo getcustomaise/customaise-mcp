@@ -19,7 +19,7 @@ This bundle connects Claude Desktop to the extension so it can do both: call the
 - **Write or edit scripts**: import an existing UserScript or AgentScript, edit it in Claude's chat, push the result back through Customaise's validation pipeline
 - **Operate tabs**: list, focus, reload, open, close, take screenshots
 
-Same 19 tools the Customaise MCP exposes to Cursor, Claude Code, Codex, Windsurf, Antigravity, and Kiro.
+Same 19 tools the Customaise MCP exposes to Cursor, Claude Code, Codex, Antigravity, and Kiro.
 
 Everything runs in the browser session where you're already signed in. No API keys, no service accounts, no separate OAuth for the sites you use.
 
@@ -59,3 +59,7 @@ Claude Desktop spawns this bundle as a local Node.js process. The bundle opens a
 - Knowledge base: [customaise.com/learn](https://customaise.com/learn)
 - How it compares: [customaise.com/compare](https://customaise.com/compare)
 - Support: [customaise.com/support](https://customaise.com/support)
+
+## Script Decisions authoring reference
+
+This 3.2.6 bundle includes `customaise://script-decisions`, alongside the UserScript and AgentScript handbooks. It explains required metadata, the CM_decisions API, a working example and bounded recovery. Pair with extension 1.3.7. Script Decisions is a Power User capability. Saved keys, device authorisation and per-script provider selection belong to the user's account and extension controls, not MCP tools. Provider charges and WebMCP approval are separate.

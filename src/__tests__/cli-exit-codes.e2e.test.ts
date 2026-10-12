@@ -410,8 +410,7 @@ describe('CLI exit codes, end to end', () => {
       // The banner used to reach only the `content` half, which a model reads.
       // A terminal agent got silence in exactly the situation it exists for:
       // installs succeed, no tool ever registers, and nothing says the
-      // "Allow user scripts" toggle is off. That toggle resets on every
-      // Chrome restart, so it is not an edge case.
+      // "Allow user scripts" permission is off.
       nextAck = { success: true, result: [] };
       systemStatus = { userScriptsDisabled: true, userScriptsApiAvailable: true,
                        configureWorldApiAvailable: true, available: true };
@@ -421,8 +420,8 @@ describe('CLI exit codes, end to end', () => {
       const { stderr } = await runCli(['scripts', 'list']);
       assert.match(stderr, /Allow user scripts.*is OFF/i,
         'the CLI said nothing about the gate');
-      assert.match(stderr, /resets every time Chrome restarts/i,
-        'it should say why it keeps happening');
+      assert.match(stderr, /enable Allow user scripts.*reload the target tab/i,
+        'it should explain the required recovery step');
     });
 
     it('doctor refuses to report healthy while the gate is off', async () => {
