@@ -104,12 +104,12 @@ async function verifyStdio(entry, cwd, env, expectedTools) {
     const tools = (await client.listTools()).tools.map((tool) => tool.name).sort();
     assert.deepEqual(tools, expectedTools);
     const resources = (await client.listResources()).resources.map((resource) => resource.uri);
-    for (const uri of ['customaise://conventions', 'customaise://agentscript-conventions', 'customaise://userscript-conventions']) {
+    for (const uri of ['customaise://conventions', 'customaise://agentscript-conventions', 'customaise://userscript-conventions', 'customaise://script-decisions']) {
       assert.ok(resources.includes(uri), `missing resource ${uri}`);
       const read = await client.readResource({ uri });
       assert.ok(read.contents.some((content) => typeof content.text === 'string' && content.text.length > 100), `empty ${uri}`);
     }
-    return { tools: tools.length, resources: resources.length, conventionsRead: 3 };
+    return { tools: tools.length, resources: resources.length, conventionsRead: 4 };
   } catch (error) {
     throw new Error(`${error.message}\nPackaged server stderr: ${stderr}`, { cause: error });
   } finally {

@@ -111,6 +111,7 @@ const EXPECTED_RESOURCES = [
   'conventions',
   'userscript-conventions',
   'agentscript-conventions',
+  'script-decisions',
 ];
 
 describe('Server Tool Registration', () => {
@@ -143,8 +144,8 @@ describe('Server Tool Registration', () => {
     assert.equal(server.registerPrompt.mock.callCount(), 0);
   });
 
-  it('registers exactly 5 resources', () => {
-    assert.equal(server.registerResource.mock.callCount(), 5);
+  it('registers five resources and one script-source template', () => {
+    assert.equal(server.registerResource.mock.callCount(), 6);
   });
 
   // ─── Tool Names ─────────────────────────────────────────────────
@@ -168,6 +169,20 @@ describe('Server Tool Registration', () => {
     for (const name of EXPECTED_RESOURCES) {
       assert.ok(registeredNames.includes(name), `Resource '${name}' not registered`);
     }
+  });
+
+  it('the served AgentScript handbook uses the real per-script setup controls', async () => {
+    const resource = server._resources.find(r => r.name === 'agentscript-conventions');
+    assert.ok(resource);
+    const result = await resource.handler(new URL('customaise://agentscript-conventions'));
+    const text = result.contents.map((item: any) => item.text).join('\n');
+    assert.match(text, /Allow user scripts/);
+    assert.match(text, /Enable the intended AgentScript in Customaise’s Scripts panel/);
+    assert.match(text, /each script has its own enable switch/);
+    assert.match(text, /Reload that page after installing or changing an AgentScript/);
+    assert.match(text, /Chrome's Allow user scripts setting is off/);
+    assert.match(text, /The intended script is disabled/);
+    assert.doesNotMatch(text, /global AgentScripts (?:toggle|gate)|Even with the global gate on|Settings → Script Management → ON/i);
   });
 
   // ─── Tool Handler Delegation ────────────────────────────────────

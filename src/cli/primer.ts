@@ -23,8 +23,8 @@ register.
 Four things must be true, and the last one catches everyone: the extension
 installed, you signed in, the Agent Bridge on in its Settings, and **"Allow user
 scripts" ticked on the Customaise card in \`chrome://extensions\`**. That last
-toggle resets every time Chrome restarts or the extension reloads, and while
-it is off nothing runs: scripts install successfully, no tool ever registers,
+permission is required on current Chrome for both store and unpacked installs.
+If it is off, scripts cannot run: scripts install successfully, no tool ever registers,
 and the only thing that tells you is the check below.
 
 Check it works before anything else. This costs no quota:
@@ -55,7 +55,22 @@ before writing anything; this is the same text an MCP client gets.
 customaise resources                              # what is published
 customaise resource userscript-conventions        # DOM manipulation
 customaise resource agentscript-conventions       # tools for AI agents
+customaise resource script-decisions              # paid typed decisions inside either script type
 \`\`\`
+
+Script Decisions uses separate Jev or Decisions API keys saved on /account.
+The user enables their device, then selects a provider in the script’s Quick
+Actions → Script Decisions. Valid @grant CM_decisions and @decisions metadata
+are required. This capability requires Power User; MCP/CLI
+cannot grant its permissions. Provider billing and WebMCP approvals are separate.
+Read the resource for bounded calls, result handling and example code.
+
+Sharing uses Quick Actions → Share Script in extension 1.3.7: Publish & share
+for subscriptions with updates, or Send for a 24-hour link to an independent
+editable copy. Power User sends; free signed-in accounts can receive. Copies
+start disabled and keep their own edits after expiry. Keys, GM values, tool
+approvals and provider choices are not copied, but secrets written into source
+remain included. MCP/CLI has no Send or Publish command; use the extension.
 
 ### The loop
 

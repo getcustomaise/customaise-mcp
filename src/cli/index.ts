@@ -222,8 +222,8 @@ function present(result: any, passthrough = false): never {
   if (data && typeof data === 'object' && (data as Record<string, unknown>).userScriptsDisabled === true) {
     process.stderr.write(
       'customaise: "Allow user scripts" is OFF for Customaise in chrome://extensions, '
-      + 'so no script will run and no WebMCP tool will register. It resets every time '
-      + 'Chrome restarts or the extension reloads.\n');
+      + 'so scripts cannot run. Open Customaise Details, enable Allow user scripts, '
+      + 'then reload the target tab.\n');
   }
 
   if (!passthrough && isRejection(data)) {
