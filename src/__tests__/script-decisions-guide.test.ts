@@ -2,34 +2,26 @@ import { it } from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {
+  SCRIPT_DECISIONS_CONVENTIONS,
   SCRIPT_DECISIONS_EXAMPLE,
-  SCRIPT_DECISIONS_TASK,
+  SCRIPT_DECISIONS_QUESTIONS,
 } from '../script-decisions-guide.js';
 
-it('the shipped example declares the documented task and grant', () => {
-  const declaration = SCRIPT_DECISIONS_EXAMPLE.match(
-    /^\/\/ @decisions (.+)$/m,
-  )![1];
-  assert.deepEqual(JSON.parse(declaration).tasks, [SCRIPT_DECISIONS_TASK]);
-  assert.match(SCRIPT_DECISIONS_EXAMPLE, /@grant CM_decisions/);
+it('the shipped example grants CM_decisions and has no @decisions header', () => {
+  assert.match(SCRIPT_DECISIONS_EXAMPLE, /^\/\/ @grant CM_decisions$/m);
+  assert.doesNotMatch(SCRIPT_DECISIONS_EXAMPLE, /@decisions/);
+  assert.match(SCRIPT_DECISIONS_CONVENTIONS, /CM_decisions\.createMany/);
 });
 
-async function runExample(
-  status: Record<string, unknown> | ((poll: number) => Record<string, unknown>),
-  error?: Error,
-) {
-  let runs = 0,
-    polls = 0;
+async function runExample(reply: () => Promise<Record<string, unknown>>) {
+  const calls: Array<Record<string, unknown>> = [];
   let handler: (() => Promise<void>) | undefined;
   const elements: Array<{
     textContent: string;
     disabled?: boolean;
-    addEventListener: (event: string, fn: () => Promise<void>) => void;
+    addEventListener: (event: string, fn: () => Promise<void>, options?: unknown) => void;
   }> = [];
   const context = vm.createContext({
-    setTimeout: (fn: () => void) => {
-      fn();
-    },
     document: {
       body: { append() {} },
       createElement: () => {
@@ -44,19 +36,9 @@ async function runExample(
       },
     },
     CM_decisions: {
-      run: async () => {
-        runs++;
-        if (error) throw error;
-        return { proposalId: 'operation-1', state: 'running', records: [] };
-      },
-      status: async (id: string) => {
-        assert.equal(id, 'operation-1');
-        polls++;
-        return {
-          proposalId: id,
-          records: [],
-          ...(typeof status === 'function' ? status(polls) : status),
-        };
+      create: async (request: Record<string, unknown>) => {
+        calls.push(JSON.parse(JSON.stringify(request)));
+        return reply();
       },
     },
   });
@@ -64,26 +46,23 @@ async function runExample(
   assert.ok(handler);
   await handler();
   assert.equal(elements[0].disabled, true);
-  assert.equal(runs, 1, 'polling must never issue another paid run');
-  return { output: elements[1].textContent, polls };
+  assert.equal(calls.length, 1, 'one click sends one request');
+  return { output: elements[1].textContent, request: calls[0] };
 }
 
-it('the example preserves an answered predicate without inventing a threshold', async () => {
-  const result = await runExample({
-    state: 'completed',
-    records: [
-      {
-        id: 'message-1',
-        answers: [
-          {
-            id: 'reply',
-            type: 'predicate',
-            status: 'answered',
-            probability: 0.72,
-          },
-        ],
-      },
-    ],
+const decision = (answers: unknown[]) => async () => ({
+  model: 'gpt-6-luna',
+  answers,
+  usage: { input_tokens: 12, output_tokens: 3, total_tokens: 15 },
+});
+
+it('sends the written-out questions and keeps the answered probability without inventing a threshold', async () => {
+  const result = await runExample(
+    decision([{ type: 'predicate', name: 'needs_reply', probability: 0.72 }]),
+  );
+  assert.deepEqual(result.request, {
+    input: 'Can you help me reset my password?',
+    questions: SCRIPT_DECISIONS_QUESTIONS,
   });
   assert.deepEqual(JSON.parse(result.output), {
     state: 'completed',
@@ -92,69 +71,17 @@ it('the example preserves an answered predicate without inventing a threshold', 
 });
 
 it('refusals are unanswered, not negative answers', async () => {
-  const result = await runExample({
-    state: 'completed',
-    records: [
-      {
-        id: 'message-1',
-        answers: [{ id: 'reply', type: 'predicate', status: 'refused' }],
-      },
-    ],
-  });
+  const result = await runExample(
+    decision([{ type: 'refusal', name: 'needs_reply' }]),
+  );
   assert.deepEqual(JSON.parse(result.output), { state: 'unanswered' });
 });
 
-it('a bounded wait retains the operation ID without resubmission', async () => {
-  const result = await runExample({ state: 'running' });
-  assert.equal(result.polls, 30);
-  assert.deepEqual(JSON.parse(result.output), {
-    state: 'pending',
-    proposalId: 'operation-1',
-  });
-});
-
-it('access and uncertain-provider errors stop the example', async () => {
-  assert.match(
-    (
-      await runExample({
-        state: 'authorization_paused',
-        code: 'dispatch_uncertain',
-      })
-    ).output,
-    /Stopped: dispatch_uncertain/,
-  );
-  const result = await runExample({}, new Error('device_paused'));
-  assert.equal(result.polls, 0);
-  assert.match(result.output, /Stopped: device_paused/);
-});
-
-it('replay rejection after navigation stops without requesting a fresh paid operation', async () => {
-  const result = await runExample({}, new Error('operation_already_used'));
-  assert.equal(result.polls, 0);
-  assert.match(result.output, /Stopped: operation_already_used/);
-});
-
-it('consumes completion on the last allowed poll', async () => {
-  const result = await runExample((poll) =>
-    poll < 30
-      ? { state: 'running' }
-      : {
-          state: 'completed',
-          records: [
-            {
-              id: 'message-1',
-              answers: [
-                {
-                  id: 'reply',
-                  type: 'predicate',
-                  status: 'answered',
-                  probability: 0.9,
-                },
-              ],
-            },
-          ],
-        },
-  );
-  assert.equal(result.polls, 30);
-  assert.equal(JSON.parse(result.output).state, 'completed');
+it('access and loop-guard errors stop the example with their code', async () => {
+  for (const code of ['key_unavailable', 'loop_paused', 'questions_not_in_code']) {
+    const result = await runExample(async () => {
+      throw Object.assign(new Error(`CM_decisions: ${code}`), { code });
+    });
+    assert.equal(result.output, `Stopped: ${code}`);
+  }
 });

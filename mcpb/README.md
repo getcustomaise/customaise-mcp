@@ -60,6 +60,6 @@ Claude Desktop spawns this bundle as a local Node.js process. The bundle opens a
 - How it compares: [customaise.com/compare](https://customaise.com/compare)
 - Support: [customaise.com/support](https://customaise.com/support)
 
-## Script Decisions authoring reference
+## Script Decisions reference
 
-This 3.2.6 bundle includes `customaise://script-decisions`, alongside the UserScript and AgentScript handbooks. It explains required metadata, the CM_decisions API, a working example and bounded recovery. Pair with extension 1.3.7. Script Decisions is a Power User capability. Saved keys, device authorisation and per-script provider selection belong to the user's account and extension controls, not MCP tools. Provider charges and WebMCP approval are separate.
+This 3.2.7 bundle includes `customaise://script-decisions`, alongside the UserScript and AgentScript handbooks. It explains the questions written in the code, the CM_decisions API, a working example and bounded recovery. Pair with extension 1.3.8. Script Decisions is a Power User capability. Saved keys, device authorisation and per-script provider selection belong to the user's account and extension controls, not MCP tools. Provider charges and WebMCP approval are separate.

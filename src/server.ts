@@ -1259,7 +1259,7 @@ export function registerPromptsAndResources(server: McpServer, bridge: Bridge): 
     'script-decisions',
     'customaise://script-decisions',
     {
-      description: 'Script Decisions: metadata, CM_decisions API, working example, setup, billing and safe failure handling for both script engines.',
+      description: 'Script Decisions: questions written in the code, the CM_decisions API, a working example, setup, billing and safe failure handling for both script engines.',
       mimeType: 'text/markdown',
       cacheHint: { ttlMs: 60 * 60 * 1000 }
     },
@@ -1300,7 +1300,7 @@ Anyone with the active link can preview its source. Review source and saved sele
 
 const USERSCRIPT_CONVENTIONS = `# Customaise UserScripts
 
-For paid typed decisions inside this script, read customaise://script-decisions before writing code. It covers @grant CM_decisions, @decisions metadata, device/provider setup and bounded failure handling.
+For paid typed decisions inside this script, read customaise://script-decisions before writing code. It covers @grant CM_decisions, CM_decisions.create and createMany with questions written out in the code, device/provider setup and failure handling.
 
 ${SCRIPT_SHARING_CONVENTIONS}
 
@@ -1645,7 +1645,7 @@ Customaise supports 26 \`GM_*\` APIs (full list canonical in \`extension/src/bac
 
 const AGENTSCRIPT_CONVENTIONS = `# Customaise AgentScripts
 
-For paid typed decisions inside this script, read customaise://script-decisions before writing code. It covers @grant CM_decisions, @decisions metadata, device/provider setup and bounded failure handling.
+For paid typed decisions inside this script, read customaise://script-decisions before writing code. It covers @grant CM_decisions, CM_decisions.create and createMany with questions written out in the code, device/provider setup and failure handling.
 
 ${SCRIPT_SHARING_CONVENTIONS}
 

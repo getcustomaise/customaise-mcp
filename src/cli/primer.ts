@@ -59,9 +59,11 @@ customaise resource script-decisions              # paid typed decisions inside 
 \`\`\`
 
 Script Decisions uses separate Jev or Decisions API keys saved on /account.
-The user enables their device, then selects a provider in the script’s Quick
-Actions → Script Decisions. Valid @grant CM_decisions and @decisions metadata
-are required. This capability requires Power User; MCP/CLI
+The user enables their device (from another device if that browser is marked
+Operated by an AI agent), then selects a provider in the script’s
+Decisions menu (its branch icon, or Quick Actions → Script Decisions). Scripts
+need @grant CM_decisions and call CM_decisions.create with questions written
+out in the code. This capability requires Power User; MCP/CLI
 cannot grant its permissions. Provider billing and WebMCP approvals are separate.
 Read the resource for bounded calls, result handling and example code.
 

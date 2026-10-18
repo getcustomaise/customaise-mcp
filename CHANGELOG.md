@@ -2,6 +2,14 @@
 
 All notable changes to `@customaise/mcp` will be documented in this file.
 
+## [3.2.7] - 2026-10-18
+
+- Rewrite `customaise://script-decisions`, also available through `customaise resource script-decisions`, for extension 1.3.8: `CM_decisions.create` and `createMany` take the Decisions API's own questions, written out in the script, and return its Decision objects. With Jev selected, Customaise translates the questions and answers. The `@decisions` metadata header described in 3.2.6 is gone.
+- Document the Decisions menu (provider, On/Off for each question set, today's count, problems found in the code), one request per batch, the loop guard and Resume, and which failures are sent again.
+- Explain that a browser marked Operated by an AI agent cannot switch on its own Script Decisions access or raise its own limits; another device does that.
+- Update both scripting handbooks, the conventions directory, the `customaise init` primer and the resource description to match. The 19 tools, approval rules and relay protocol are unchanged.
+- Pair with extension **1.3.8** and the matching **3.2.7** Claude Desktop bundle.
+
 ## [3.2.6] - 2026-10-11
 
 - Update the bundled MCP client dependency to 2.2.0 for GHSA-6qxp-vccf-f47h. The advisory concerns OAuth clients; Customaise uses local stdio/bearer connections, and still ships the patched dependency.

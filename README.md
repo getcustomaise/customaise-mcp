@@ -148,12 +148,12 @@ Five resources and one script resource template that connected agents can read v
 | `customaise://conventions` | Points at the right handbook for the script type you're working on |
 | `customaise://userscript-conventions` | Full UserScript reference: file structure, IIFE pattern, `GM_*` APIs, symbol-level editing, `@match` and `@namespace` rules |
 | `customaise://agentscript-conventions` | Full AgentScript reference: the `// ==AgentScript==` block, `// @webmcp <tool> <permission>` declarations, `navigator.modelContext.registerTool()`, consent model |
-| `customaise://script-decisions` | Shared UserScript/AgentScript guide: typed questions, metadata, CM_decisions API, working example, device/provider setup, billing and failure handling |
+| `customaise://script-decisions` | Shared UserScript/AgentScript guide: Decisions API questions, the CM_decisions API, working example, device/provider setup, billing and failure handling |
 
 ## Script Decisions in UserScripts and AgentScripts
 
-Extension **1.3.7** and MCP/CLI **3.2.6** include the authoring guide and example.
-Script Decisions is a **Power User capability**, available with extension 1.3.7 and later.
+Extension **1.3.8** and MCP/CLI **3.2.7** include the Script Decisions guide and example.
+Script Decisions is a **Power User capability**; the form described here needs extension 1.3.8 or later.
 Read `customaise://script-decisions` over MCP or run:
 
 ```sh
@@ -162,21 +162,22 @@ customaise resource script-decisions
 
 Use it for bounded text classification, relevance checks and scoring; use ordinary
 code for extraction, exact rules and actions. Both script engines declare
-`@grant CM_decisions` plus one valid `@decisions` JSON object, then use
-`CM_decisions.run`, `status` and `cancel`. The resource contains a complete
+`@grant CM_decisions` and call `CM_decisions.create` or `createMany` with
+Decisions API questions written out in the code. The resource contains a complete
 UserScript and instructions for wrapping the same helper in an AgentScript tool.
 
 The user saves separate Jev/Decisions API keys on `/account#script-decisions`,
-enables the device in **Your Devices**, and selects a provider in the script's
-**Quick Actions → Script Decisions**. Requests then run automatically. Settings
+enables the device in **Your Devices** (from another device when that browser
+is marked **Operated by an AI agent**), and selects a provider in the script's
+Decisions menu (its branch icon, or **Quick Actions → Script Decisions**). Requests then run automatically. Settings
 can pause the device without losing selections; Data & Analytics reports usage
 by device/provider. Provider charges and budgets are separate from Customaise
 browser AI tokens. MCP/CLI cannot set these protected permissions or supply keys.
 WebMCP approval still applies independently to the containing tool.
 
-Poll the same operation ID with a bounded wait. Preserve refusals and unknown
-outcomes; do not resubmit uncertain paid work under a new key or switch providers
-automatically. Code/metadata changes can require provider reselection. See the
+`create` and `createMany` wait for the answers themselves. Preserve refusals and
+errors; do not resend uncertain work or switch providers automatically. Changing
+a script's code asks for its provider to be chosen again. See the
 [Script Decisions guide](https://customaise.com/learn/script-decisions).
 
 ### Let an agent set up the CLI
@@ -189,7 +190,7 @@ project primer with `init`, and read the conventions before script work.
 The [CLI guide](https://customaise.com/learn/cli) and
 [Grok Bot guide](https://customaise.com/learn/grok-bot) provide the same prompts.
 
-## Updating to MCP/CLI 3.2.6 and extension 1.3.7
+## Updating to MCP/CLI 3.2.7 and extension 1.3.8
 
 The CLI and Desktop bundle ship the same tested runtime dependencies. Runtime
 dependencies are bundled in the npm tarball so fresh installs retain those
@@ -198,7 +199,7 @@ versions. Contributors should use `npm ci`; dependency updates belong in
 
 Update both the extension and the companion for the latest permission controls
 and status reporting. The npm package contains both `customaise-mcp`
-and the `customaise` CLI; Claude Desktop uses the matching 3.2.6 `.mcpb` bundle.
+and the `customaise` CLI; Claude Desktop uses the matching 3.2.7 `.mcpb` bundle.
 Restart all MCP clients and any running Customaise CLI daemon after updating.
 The 19-tool surface and relay protocol 2 are unchanged from 3.2.3.
 
