@@ -285,7 +285,7 @@ IMPORTANT: Save files inside your current workspace or project directory (e.g., 
 
   server.registerTool('export_script', { description: `Export a script from a local file into Customaise. The file will be validated through Customaise's sanitization pipeline (syntax checking, AST validation, security analysis). If valid, the script is installed and ready to execute on matching pages. If invalid, detailed diagnostics explain exactly what to fix. Pass scriptId to update an existing script instead of creating a new one. Pass expectedCodeHash from import_script to reject stale edits. Save progress includes an operation ID and stage. A timeout may leave the outcome unknown: query get_bridge_status with the scriptId and operationId from the error before retrying. The extension enforces a 90-second save deadline and cancels work that has not reached persistence. A storage write already submitted cannot be recalled; its commit receipt resolves that uncertainty. NOTE: You cannot overwrite a shared/subscribed script — they are read-only. If you need to edit a shared script, first call import_script with fork:true (creates an editable independent copy), then export to that copy's scriptId.
 
-    Reminder for UserScripts: Must use an IIFE with named functions for symbol-level editing, \`// @namespace https://customaise.com\`, and standard directives (@name, @match, @grant).
+    Reminder for new UserScripts: Prefer named functions in an IIFE for symbol-level editing; preserve valid imported source, \`// @namespace https://customaise.com\`, and standard directives (@name, @match, @grant).
     Reminder for AgentScripts: MUST use \`// ==AgentScript==\` block, MUST explicitly declare tools via \`// @webmcp <toolName> <permission>\` (e.g. \`// @webmcp my_tool prompt\`). Permissions: allow (autonomous), prompt (interactive), deny (blocked). Prefer \`prompt\`: in a script you write, \`allow\` resolves as \`prompt\` before user grants are applied; a saved Allow rule or user-enabled Full access can permit it. Prefer named top-level functions and top-level tool registration for symbol editing; IIFEs are supported. CAN use GM_* APIs for persistence, networking, and observability alongside \`navigator.modelContext.registerTool()\`.`, inputSchema: z.object({
               filePath: z.string().describe('Local file path containing the userscript source code'),
               scriptId: z.string().optional().describe('ID of an existing script to update. Omit to create a new script.'),
@@ -1306,7 +1306,7 @@ ${SCRIPT_SHARING_CONVENTIONS}
 
 ## File Format & Structure
 Every userscript is a single \`.user.js\` file with a metadata block at the top. 
-**CRITICAL**: Customaise supports symbol-level editing (function-by-function). To enable this, your script MUST be wrapped in an IIFE containing **named functions**, rather than flat inline code.
+For new scripts, prefer **named functions** inside an IIFE for symbol-level editing. Valid imported scripts do not have to use this structure: preserve their source and metadata. Do not rewrite a working library just to match this example. See \`@unwrap\` below for direct page execution.
 
 \`\`\`javascript
 // ==UserScript==
@@ -1316,7 +1316,6 @@ Every userscript is a single \`.user.js\` file with a metadata block at the top.
 // @match       https://example.com/*
 // @version     1.0
 // @grant       GM_log
-// @grant       CM_findElement
 // @run-at      document-idle
 // ==/UserScript==
 
@@ -1330,8 +1329,8 @@ Every userscript is a single \`.user.js\` file with a metadata block at the top.
   }
 
   async function hideAnnoyingBanner() {
-    // CM_findElement is our bulletproof DOM selector
-    const banner = await CM_findElement('dom_banner_123');
+    // Replace this selector after inspecting the actual page.
+    const banner = document.querySelector('[data-annoying-banner]');
     if (banner) banner.style.display = 'none';
   }
 
@@ -1342,21 +1341,26 @@ Every userscript is a single \`.user.js\` file with a metadata block at the top.
 ## Metadata Directives
 | Directive | Required | Description |
 |-----------|----------|-------------|
-| \`@name\` | ✅ | Script name (must be unique) |
-| \`@match\` | ✅ | URL pattern(s) where the script runs (\`*://*.example.com/*\`) |
+| \`@name\` | ✅ | Script name; the namespace also contributes to imported identity |
+| \`@match\` | Recommended | URL pattern(s) where the script runs (\`*://*.example.com/*\`). Include-only scripts are also supported; \`@exclude\` takes precedence. Imported \`@include\` rules follow the user’s Include mode setting. |
 | \`@description\` | Recommended | What the script does |
 | \`@version\` | Recommended | Semantic version (defaults to 1.0) |
 | \`@grant\` | Optional | GM_* or CM_* APIs to enable (use \`none\` for no special APIs) |
-| \`@run-at\` | Optional | When to inject: \`document-start\`, \`document-end\`, \`document-idle\` (default) |
-| \`@connect\` | Optional | Domains allowed for \`GM_xmlhttpRequest\` (e.g., \`api.github.com\`) |
+| \`@run-at\` | Optional | When to inject: \`document-start\`, \`document-body\`, \`document-end\`, \`document-idle\` (default), or \`context-menu\`, which runs the script when the user picks it in Chrome's right-click menu |
+| \`@connect\` | Optional | Hosts the script reaches with \`GM_xmlhttpRequest\` (e.g., \`api.github.com\`). List every host: once a script lists any, an unlisted host is refused. With no \`@connect\` line, or \`@connect *\`, Customaise asks the user about each new host. \`@connect none\` allows only the page's own site, which never needs an entry. |
 | \`@domId\` | Auto | Auto-managed by Customaise for \`CM_findElement\`. **Do not edit manually.** |
 | \`@require\` | Optional | External JS libraries to load before the script |
 | \`@resource\` | Optional | Named external resources (CSS, JSON, images) accessible via \`GM_getResourceText/URL\` |
+| \`@include\` / \`@exclude\` | Optional | More URL patterns where the script runs, or never runs; regular expressions allowed |
+| \`@noframes\` | Optional | Run in the top-level page only, not in frames |
+| \`@run-in\` | Optional | \`normal-tabs\` or \`incognito-tabs\` to run only in normal or only in private windows |
+| \`@sandbox\` / \`@inject-into\` | Optional | \`@sandbox DOM\` or \`@inject-into content\` asks to run apart from the page. Under the default Script isolation setting scripts run alongside the page anyway, so read page variables through \`unsafeWindow\` rather than relying on isolation |
+| \`@unwrap\` | Optional | Run directly in the page without a wrapper |
 | \`@namespace\` | Recommended | Script namespace. Use \`https://customaise.com\`. |
 | \`@author\` | Optional | Script author |
 
 ## CM_findElement (Bulletproof DOM Targeting)
-Customaise provides a revolutionary multi-tier selector API that guarantees 100% element targeting reliability, surviving UI redesigns and dynamic class changes.
+Customaise resolves saved element selections through several selector strategies. These help with changing classes and layout, but a changed or missing target can still fail. Check the result against the current page and handle a missing element.
 
 **Usage:**
 1. You must declare \`@grant CM_findElement\`
@@ -1583,7 +1587,7 @@ try {
 - **Don't invent CDP method names.** \`Page.captureFullScreenshot\` doesn't exist; \`Page.captureScreenshot\` does.
 
 ## Available GM_* APIs
-Customaise supports 26 \`GM_*\` APIs (full list canonical in \`extension/src/background/services/metadata-schema-normalizer.js\` \`SUPPORTED_GRANTS\`). You can use either the classic \`GM_*\` (underscore) or modern \`GM.*\` (promise-based) syntax.
+Customaise supports 27 \`GM_*\` APIs, plus \`unsafeWindow\` and the \`window.onurlchange\`, \`window.close\` and \`window.focus\` grants (full list canonical in \`extension/src/background/services/metadata-schema-normalizer.js\` \`SUPPORTED_GRANTS\`). Classic \`GM_*\` and modern \`GM.*\` aliases are supported. Return values are API-specific: modern storage operations return Promises, while some DOM and menu helpers return their result directly. Do not infer a Promise or callback contract from the spelling alone. Related grants can expose a whole API family; declare the APIs you actually use. \`GM_webRequest\` is not provided: a script that grants it installs and runs without it.
 
 ### Environment & Console
 | API | Description |
@@ -1598,31 +1602,31 @@ Customaise supports 26 \`GM_*\` APIs (full list canonical in \`extension/src/bac
 | \`GM_getValue(k, def)\` | Read from persistent storage |
 | \`GM_deleteValue(k)\` | Delete from persistent storage |
 | \`GM_listValues()\` | List all stored keys |
-| \`GM_setValues({k:v,...})\` | Bulk set (v5.3+); atomic write of multiple keys in one call |
+| \`GM_setValues({k:v,...})\` | Save multiple keys in one call; await \`GM.setValues\` for persisted completion |
 | \`GM_getValues([keys])\` | Bulk read (v5.3+); fewer round-trips than per-key \`getValue\` |
 | \`GM_deleteValues([keys])\` | Bulk delete (v5.3+) |
-| \`GM_addValueChangeListener(name, cb)\` | Listen for storage changes across tabs |
+| \`GM_addValueChangeListener(name, cb)\` | Listen for changes: \`(name, oldValue, newValue, remote)\`. \`remote\` identifies another script instance; own writes use false |
 | \`GM_removeValueChangeListener(id)\` | Remove storage listener |
 
 ### Cookies (Advanced)
 | API | Description |
 |-----|-------------|
-| \`GM_cookie\` | Frozen object with sub-methods, NOT a callable. \`await GM_cookie.list(details)\` returns matching cookies; \`await GM_cookie.set(details)\` writes one; \`await GM_cookie.delete(details)\` removes one. Each method also accepts a Node-style \`(err, result) => ...\` callback as a second arg; omit it to get a Promise back. \`details\` is the same shape \`chrome.cookies\` uses (url / name / domain / path / value / secure / httpOnly / sameSite / expirationDate etc.). Subject to host permissions and the script's \`@connect\` allowlist. Note: \`.store\` is a Firefox-container-specific Tampermonkey method that's stubbed in Chromium and will reject. |
+| \`GM_cookie\` / \`GM.cookie\` | Use \`GM.cookie.list(details)\` for a Promise of matching cookies; modern \`set\` and \`delete\` resolve with no value. Modern methods ignore callback arguments. Legacy \`GM_cookie.list(details, callback)\` calls \`callback(cookies, error)\`; legacy \`set\`/\`delete\` call \`callback(error)\`. Legacy methods return undefined, including without a callback. Errors are strings; the success error slot is undefined. Grant \`GM_cookie\` or \`GM.cookie\`. An omitted URL uses the calling document's URL; the requested URL must satisfy the script's include/match/exclude rules. The native document selects its cookie store. Standard cookie fields and an explicit \`partitionKey\` are passed to Chrome; browser support applies. Do not use \`.store\`: Customaise retains an unsupported stub, and this is not a documented Tampermonkey method. |
 
 ### DOM & UI
 | API | Description |
 |-----|-------------|
 | \`GM_addStyle(css)\` | Inject CSS into the page |
 | \`GM_addElement(tag, attr)\` | Safely create and append DOM elements |
-| \`GM_registerMenuCommand(name, fn)\` | Add a command to the extension menu |
+| \`GM_registerMenuCommand(caption, fn, options?)\` | Add a command the user runs from the script's Quick Actions → Script commands or from Chrome's right-click menu. \`options\`: \`{ id?, accessKey?, title?, autoClose? }\`, or an access-key string. Returns the command's id. |
 | \`GM_unregisterMenuCommand(id)\` | Remove a menu command |
 | \`GM_notification(details)\` | Show a desktop OS notification |
 
 ### Network & Resources
 | API | Description |
 |-----|-------------|
-| \`GM_xmlhttpRequest(details)\` | Cross-origin HTTP request. \`details\` shape: \`{ method, url, headers?, data?, responseType?, timeout?, onload, onerror, onreadystatechange?, ontimeout?, onabort?, onprogress? }\`. Returns an object with an \`.abort()\` method. **Requires \`@connect <host>\` directive** for the URL's host, otherwise the call fails silently. Successful response object exposes \`status\`, \`statusText\`, \`responseHeaders\`, \`responseText\`, \`response\` (parsed per \`responseType\`), \`finalUrl\`. |
-| \`GM_download(details)\` | Save a URL to disk. \`details\` shape: \`{ url, name, headers?, saveAs?, onload?, onerror?, ontimeout?, onprogress? }\`. The \`name\` is the suggested filename; \`saveAs: true\` prompts the user for the location. Same \`@connect\` gating as \`GM_xmlhttpRequest\`. |
+| \`GM_xmlhttpRequest(details)\` | Cross-origin HTTP request. \`details\` shape: \`{ method, url, headers?, data?, responseType?, timeout?, onload, onerror, onreadystatechange?, ontimeout?, onabort?, onprogress? }\`. Returns an object with an \`.abort()\` method. **List the URL's host in \`@connect\`:** once a script lists any host, an unlisted one is refused and \`onerror\` reports it; with none listed, the user is asked about each new host. Successful response object exposes \`status\`, \`statusText\`, \`responseHeaders\`, \`responseText\`, \`response\` (parsed per \`responseType\`), \`finalUrl\`. |
+| \`GM_download(details)\` | Save a URL to disk. \`details\` shape: \`{ url, name, headers?, saveAs?, onload?, onerror?, ontimeout?, onprogress? }\`. The \`name\` is the suggested filename; \`saveAs: true\` prompts the user for the location. A download from a host the script didn't list in \`@connect\` asks the user first. |
 | \`GM_notification(details)\` | Show a desktop OS notification. \`details\` shape: \`{ text, title?, image?, highlight?, silent?, timeout?, onclick?, ondone? }\` OR the short form \`GM_notification(text, title?, image?, onclick?)\`. \`timeout\` in milliseconds (0 = sticky). |
 | \`GM_getResourceText(name)\` | Read text content from a \`@resource\` declaration |
 | \`GM_getResourceURL(name)\` | Get base64 data URI for a \`@resource\` declaration |
@@ -1635,10 +1639,40 @@ Customaise supports 26 \`GM_*\` APIs (full list canonical in \`extension/src/bac
 | \`GM_getTab(cb)\` | Read the per-tab persisted object for the current tab. \`cb\` receives the stored object (or empty \`{}\`). Per-tab storage is independent from \`GM_setValue\`'s extension-wide storage and is cleared when the tab closes. |
 | \`GM_saveTab(obj)\` | Persist an object as the current tab's per-tab state. Overwrites any previous value. |
 | \`GM_getTabs(cb)\` | Read every tab's per-tab persisted object. \`cb\` receives \`{ tabId: object, ... }\`. |
+| \`GM_audio\` | The tab's audio: \`setMute({ isMuted })\`, \`getState()\` (gives \`{ isMuted, muteReason, isAudible }\`), \`addStateChangeListener(fn)\` and \`removeStateChangeListener(fn)\`. Callbacks under \`GM_audio\`, Promises under \`GM.audio\`. |
+
+### Page access
+| API | Description |
+|-----|-------------|
+| \`unsafeWindow\` | The page's own \`window\`, for reading and changing its variables. Grant it with \`@grant unsafeWindow\`. |
+| \`window.onurlchange\` | With \`@grant window.onurlchange\`, the script receives \`urlchange\` events, each with \`{ url }\`, when a single-page app changes its URL (push, replace, back or forward). Set \`window.onurlchange\` or call \`window.addEventListener('urlchange', fn)\`. |
+| \`window.close\` / \`window.focus\` | With the matching grant, close or focus the tab the script runs in. |
+
+## Where scripts run
+Check these before deciding a script is broken:
+- **Blocked pages.** Userscripts don't run on, or send requests to, pages on the user's Blocked pages list (Settings → Scripts). Until the user saves their own list it holds a starter list: \`example.org\`, PayPal, Stripe, Deutsche Bank 24, Bank of America, embedded Google API frames, Facebook plugin frames and Twitter widgets. Test somewhere else, such as \`example.com\`. AgentScripts are not affected.
+- **Allowed pages.** If the user lists any, userscripts run only on pages that match one.
+- **Blocked sources.** \`@require\` and \`@resource\` addresses on the user's Blocked sources never load. By default the list holds \`example.com\`, so load libraries from elsewhere.
+- **Private windows.** By default private windows share a temporary copy of each script's saved values, which ends when the last private window closes. Private downloads stay out of normal history.
+- **Browser setup.** Local UserScripts run on Free, signed out and without Agent Bridge. Enable Allow user scripts in Customaise's Chrome extension Details; check the individual script switch as well. Use https://customaise.com/connect/ to diagnose setup.
+- **Browser requirement.** Customaise 1.3.9 requires Chrome 147 or later, matching the tested release baseline. \`@unwrap\` and \`@run-at context-menu\` are supported in that baseline. Firefox containers, Firefox-only globals and E4X syntax are not provided.
+- **Execution timing.** All five \`@run-at\` modes are supported. Their order is respected, but \`document-start\` cannot guarantee running before every website script. Handle a DOM that changes after injection.
+- **Edits pause updates.** Saving changes to an installed script that updates from a URL pauses its automatic updates, as a person's edit does.
+
+## Importing and maintaining a library (extension 1.3.9)
+- **Backup restore is in the extension UI:** Settings → Scripts → Manual Restore accepts Tampermonkey ZIP/JSON and Customaise backups with script source, saved values and supported settings. There is no MCP backup-import command. For one script use the documented import/export tools and keep its source intact.
+- **Identity and recovery:** keep names, namespaces, unknown metadata and original source. Do not rename an imported library to resolve an invented uniqueness rule. After interruption, scripts already saved remain and repeating restore completes without duplicate copies. Keep the source backup until the actual workflows pass.
+- **Script options:** Settings → Scripts → Advanced has nine options: Sites scripts can contact, Library checks, Origin header, Cookie access, Local files, Saved data in private windows, Run scripts in, Script isolation and @include rules. Imported supported settings can change the defaults described here. See https://customaise.com/learn/userscripts#advanced-options.
+- **Page access:** default Script isolation is In the page with a scoped window. Read page variables through \`unsafeWindow\`. Do not assume \`@sandbox DOM\` forces isolation under that default; the user's Script isolation choice controls it.
+- **Local dependencies:** \`file://\` \`@require\` and \`@resource\` need Chrome's Allow access to file URLs and the local-file option. Files are read again on the next page load, not live-replaced on an already open page. A missing local library reports a warning; invalid local JavaScript prevents execution until fixed, then the next page load retries it.
+- **Updates:** local edits pause automatic updates. A manual update asks before replacing those edits. In 1.3.9 the updater also restores headers that 1.3.7/1.3.8 had rewritten.
+- **Network:** under the default option, no \`@connect\` entries or \`*\` asks about each new host. Specific entries refuse unlisted hosts; \`none\` keeps only the page's own host. IPv6 literals are supported: \`[::1]\` or bare \`::1\` declares a host, \`[::1]:8080\` only that port, with equivalent IPv6 spellings normalized. Downloads from undeclared hosts ask first. Never bypass a refused request or change permission settings to make a test pass.
+- **Request results:** handle load, error, abort and timeout separately. Compressed responses are decoded; large responses are delivered in order and joined before completion. Missing transfer data is an error, not successful truncated output. This is not an unlimited-memory or speed guarantee. \`responseHeaders\` includes Set-Cookie; HttpOnly cookie headers require \`GM_cookie\`. Use \`GM.xmlHttpRequest\` for Promise completion (with its abort handle), and the documented callbacks for classic \`GM_xmlhttpRequest\`.
+- **Validate the workflow:** install → review/enable → reload the matching page → check the visible effect, saved values and request results → reload/reuse. Browser restart, navigation and back/forward restoration should not require reinstalling the script. Do not translate selected regression results into universal Tampermonkey compatibility.
 
 ## Developer Workflow & Best Practices
 1. **Use \`GM_log\` over \`console.log\`:** \`GM_log\` output is explicitly tracked by Customaise and is visible when using the \`get_console_context\` MCP tool.
-2. **Cross-Origin Requests:** If your script needs to fetch data from \`api.github.com\`, you MUST include \`// @connect api.github.com\` in the metadata block, or \`GM_xmlhttpRequest\` will fail silently.
+2. **Cross-Origin Requests:** If your script fetches from \`api.github.com\`, add \`// @connect api.github.com\`. Once a script lists any host, an unlisted one is refused and the request's \`onerror\` reports it; with no \`@connect\` line the user is asked about each new host.
 3. **Handle Dynamic Pages:** Most modern sites are SPAs (Single Page Applications). Elements may not exist immediately. Use \`CM_findElement\` or \`MutationObserver\` instead of assuming elements are present on load.
 4. **Execution Timing:** \`// @run-at document-idle\` is the safest default as it ensures the initial DOM is fully parsed.
 `;

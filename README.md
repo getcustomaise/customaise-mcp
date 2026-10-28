@@ -21,7 +21,7 @@ nobody has to guess this from a 2.x version number.
 ## Quick Start
 
 ### 1. Install Customaise
-Install the [Customaise Chrome extension](https://customaise.com) and enable **MCP Bridge** in Settings.
+Install the [Customaise Chrome extension](https://customaise.com) on **Chrome 147 or later** and enable **MCP Bridge** in Settings. Chrome 147 is the tested release baseline for extension 1.3.9.
 
 ### 2. Add to your IDE
 
@@ -190,7 +190,7 @@ project primer with `init`, and read the conventions before script work.
 The [CLI guide](https://customaise.com/learn/cli) and
 [Grok Bot guide](https://customaise.com/learn/grok-bot) provide the same prompts.
 
-## Updating to MCP/CLI 3.2.7 and extension 1.3.8
+## Updating to MCP/CLI 3.2.8 and extension 1.3.9
 
 The CLI and Desktop bundle ship the same tested runtime dependencies. Runtime
 dependencies are bundled in the npm tarball so fresh installs retain those
@@ -199,9 +199,21 @@ versions. Contributors should use `npm ci`; dependency updates belong in
 
 Update both the extension and the companion for the latest permission controls
 and status reporting. The npm package contains both `customaise-mcp`
-and the `customaise` CLI; Claude Desktop uses the matching 3.2.7 `.mcpb` bundle.
+and the `customaise` CLI; Claude Desktop uses the matching 3.2.8 `.mcpb` bundle.
 Restart all MCP clients and any running Customaise CLI daemon after updating.
 The 19-tool surface and relay protocol 2 are unchanged from 3.2.3.
+
+The UserScript handbook now covers the 1.3.9 library workflow: Tampermonkey
+ZIP/JSON restore through Settings → Scripts → Manual Restore, preserved source
+and saved values, nine Script options, all five execution timings, API-specific
+callback/Promise forms, IPv6 network declarations, compressed/large responses,
+local dependencies, private-session values and paused updates after edits.
+Read `customaise://userscript-conventions` or run
+`customaise resource userscript-conventions` before editing an imported script.
+The [migration reference](https://customaise.com/learn/userscripts#moving-scripts)
+explains browser requirements and known limits. Selected regression coverage
+does not establish universal Tampermonkey compatibility.
+
 
 In extension 1.3.6, Settings → Agent permissions offers **Use tool permissions**
 (the default) and **Full access**. A user-confirmed Full access grant lets eligible

@@ -185,6 +185,23 @@ describe('Server Tool Registration', () => {
     assert.doesNotMatch(text, /global AgentScripts (?:toggle|gate)|Even with the global gate on|Settings → Script Management → ON/i);
   });
 
+  it('serves the 1.3.9 library and runtime contracts to agents', async () => {
+    const resource = server._resources.find(r => r.name === 'userscript-conventions');
+    assert.ok(resource);
+    const result = await resource.handler(new URL('customaise://userscript-conventions'));
+    const text = result.contents.map((item: any) => item.text).join('\n');
+    for (const contract of [
+      'Manual Restore', 'Tampermonkey ZIP/JSON', 'saved values',
+      'preserve their source and metadata', 'In the page with a scoped window',
+      'Legacy methods return undefined, including without a callback',
+      'Return values are API-specific', 'last private window closes',
+      '[::1]:8080', 'Missing transfer data is an error',
+      'document-start` cannot guarantee running before every website script',
+      'GM_webRequest` is not provided', 'There is no MCP backup-import command',
+    ]) assert.ok(text.includes(contract), `Missing handbook contract: ${contract}`);
+    assert.doesNotMatch(text, /MUST be wrapped|100% element targeting|dom_banner_123/);
+  });
+
   // ─── Tool Handler Delegation ────────────────────────────────────
 
   describe('tool handlers delegate to bridge correctly', () => {

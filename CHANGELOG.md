@@ -2,6 +2,15 @@
 
 All notable changes to `@customaise/mcp` will be documented in this file.
 
+## [3.2.8] - 2026-10-27
+
+- Document Chrome 147 or later as extension 1.3.9's supported minimum and tested release baseline. Earlier Chrome versions are outside this release's support range.
+
+- Correct the `GM_cookie` row of the GM API guide. `GM.cookie.list(details)` returns a Promise of the matching cookies, and the modern `set` and `delete` resolve with no value; modern methods ignore callback arguments. Legacy `GM_cookie.list(details, callback)` calls `callback(cookies, error)`, and legacy `set` and `delete` call `callback(error)`; legacy methods return undefined. An omitted URL uses the calling document's URL, which must satisfy the script's include, match and exclude rules. The 19 tools, approval rules and relay protocol are unchanged.
+- Update `customaise://userscript-conventions`, also available through `customaise resource userscript-conventions`, for extension 1.3.9: when `@connect` refuses and when Customaise asks, `@run-at document-body` and `context-menu`, `@include`/`@exclude`, `@noframes`, `@run-in`, `@sandbox`, `@unwrap`, `GM_registerMenuCommand` options and Script commands, `GM_audio`, `unsafeWindow` and the `window` grants, and where scripts run: blocked and allowed pages, blocked sources and private windows.
+- Align the UserScript handbook with the full 1.3.9 checkpoint set: backup restore, source preservation, grant families, default page context, callback/Promise differences, nine Script options, IPv6 declarations, compressed and large responses, local-file reload, private-session storage and update protection. Remove the mandatory-IIFE rule for imports and the selector reliability guarantee.
+- Pair with extension **1.3.9** and the matching **3.2.8** Claude Desktop bundle.
+
 ## [3.2.7] - 2026-10-18
 
 - Rewrite `customaise://script-decisions`, also available through `customaise resource script-decisions`, for extension 1.3.8: `CM_decisions.create` and `createMany` take the Decisions API's own questions, written out in the script, and return its Decision objects. With Jev selected, Customaise translates the questions and answers. The `@decisions` metadata header described in 3.2.6 is gone.
