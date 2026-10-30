@@ -21,7 +21,7 @@ nobody has to guess this from a 2.x version number.
 ## Quick Start
 
 ### 1. Install Customaise
-Install the [Customaise Chrome extension](https://customaise.com) on **Chrome 147 or later** and enable **MCP Bridge** in Settings. Chrome 147 is the tested release baseline for extension 1.3.9.
+Install the [Customaise Chrome extension](https://customaise.com) on **Chrome 147 or later**, sign in, and turn on **Agent Bridge** in Settings → MCP & Terminal. Chrome 147 is the tested release baseline for extension 1.3.9.
 
 ### 2. Add to your IDE
 
@@ -42,13 +42,14 @@ Install the [Customaise Chrome extension](https://customaise.com) on **Chrome 14
 claude mcp add customaise -- npx -y @customaise/mcp
 ```
 
-**Claude Desktop** (`claude_desktop_config.json`):
+**Claude Desktop**: install `customaise.mcpb` from the [latest release](https://github.com/getcustomaise/customaise-mcp/releases/latest). The bundle returns page content inline, which a chat client needs (see [Chat clients and file-less agents](#chat-clients-and-file-less-agents)). Or add it to `claude_desktop_config.json` with the same setting:
 ```json
 {
   "mcpServers": {
     "customaise": {
       "command": "npx",
-      "args": ["-y", "@customaise/mcp"]
+      "args": ["-y", "@customaise/mcp"],
+      "env": { "CUSTOMAISE_MCP_OUTPUT": "inline" }
     }
   }
 }
@@ -117,7 +118,7 @@ Your agent can now read and edit UserScripts, build AgentScripts that expose Web
 ### Visual DOM Targeting
 | Tool | Description |
 |------|-------------|
-| `get_selected_elements` | Get the DOM elements the user has visually selected, with bulletproof selectors and screenshots |
+| `get_selected_elements` | Get the DOM elements the user has visually selected, with stable, tiered selectors and screenshots |
 | `take_screenshot` | Capture any tab (not just the visible one) as a viewport or full-page image |
 
 ### WebMCP Agent Tools
@@ -152,8 +153,7 @@ Five resources and one script resource template that connected agents can read v
 
 ## Script Decisions in UserScripts and AgentScripts
 
-Extension **1.3.8** and MCP/CLI **3.2.7** include the Script Decisions guide and example.
-Script Decisions is a **Power User capability**; the form described here needs extension 1.3.8 or later.
+Script Decisions is a **Power User capability** and needs extension 1.3.8 or later.
 Read `customaise://script-decisions` over MCP or run:
 
 ```sh
@@ -180,16 +180,6 @@ errors; do not resend uncertain work or switch providers automatically. Changing
 a script's code asks for its provider to be chosen again. See the
 [Script Decisions guide](https://customaise.com/learn/script-decisions).
 
-### Let an agent set up the CLI
-
-In extension **Settings → MCP & Terminal → Quick Setup → Terminal**, copy the
-setup prompt for Codex, Claude Code or another shell agent. The **Grok Bot** tab
-has a prompt for installing the CLI on the Bot's own computer. Both prompts
-verify Node.js, install the current published package, run `doctor`, add the
-project primer with `init`, and read the conventions before script work.
-The [CLI guide](https://customaise.com/learn/cli) and
-[Grok Bot guide](https://customaise.com/learn/grok-bot) provide the same prompts.
-
 ## Updating to MCP/CLI 3.2.8 and extension 1.3.9
 
 The CLI and Desktop bundle ship the same tested runtime dependencies. Runtime
@@ -211,11 +201,13 @@ local dependencies, private-session values and paused updates after edits.
 Read `customaise://userscript-conventions` or run
 `customaise resource userscript-conventions` before editing an imported script.
 The [migration reference](https://customaise.com/learn/userscripts#moving-scripts)
-explains browser requirements and known limits. Selected regression coverage
-does not establish universal Tampermonkey compatibility.
+covers moving a library from Tampermonkey. Customaise provides every GM API and
+metadata key Tampermonkey supports on Chrome.
 
 
-In extension 1.3.6, Settings → Agent permissions offers **Use tool permissions**
+## Agent permissions and Full access
+
+Settings → Agent permissions offers **Use tool permissions**
 (the default) and **Full access**. A user-confirmed Full access grant lets eligible
 Prompt tools run without repeated Customaise approvals in that browser profile,
 including new and updated tools. Saved Deny rules, undeclared tools, disabled
@@ -238,14 +230,14 @@ verification to recover before retrying; a genuine subscription change still
 applies normally. Tool actions are never replayed automatically. Structured
 permission refusal details and CLI exit codes survive leader/follower forwarding.
 
-Extension 1.3.5 also syncs explicit per-tool Allow/Prompt/Deny choices with each
+Customaise also syncs explicit per-tool Allow/Prompt/Deny choices with each
 script. Update and finish syncing the browser holding those choices before
 removing its profile, and use the updated extension when restoring. Previously
 discarded local-only choices cannot be recovered from older cloud snapshots.
 Resetting a tool to its script default syncs too; older clients without this
 field do not erase the saved choices.
 
-## Save deadlines and recovery (extension 1.3.4 / MCP 3.2.3)
+## Save deadlines and recovery
 
 `export_script` reports an operation ID and stages such as normalization,
 Monaco queue/setup, resources and persistence. The extension bounds the whole
@@ -276,7 +268,7 @@ unchanged; the full save contract requires extension 1.3.4.
 AgentScripts register tools on web pages via `navigator.modelContext.registerTool(...)`. Each tool is declared in the AgentScript's `// @webmcp <toolName> <permission>` header with one of three permissions:
 
 - **`allow`**: tool executes immediately. ~50 to 100ms round-trip per call (the extension still runs permission checks).
-- **`prompt`**: in the default tool-permissions mode, each call surfaces an in-browser consent modal and blocks until the user approves or denies. User-enabled Full access in extension 1.3.6 lets eligible Prompt tools run without that modal; Deny rules and separate DevTools requirements still apply. Up to **5 minutes**. Design for this. Don't chain prompt-gated calls in tight loops, and treat a long `call_webmcp_tool` as normal.
+- **`prompt`**: in the default tool-permissions mode, each call surfaces an in-browser consent modal and blocks until the user approves or denies. User-enabled Full access lets eligible Prompt tools run without that modal; Deny rules and separate DevTools requirements still apply. Up to **5 minutes**. Design for this. Don't chain prompt-gated calls in tight loops, and treat a long `call_webmcp_tool` as normal.
 - **`deny`**: tool is suppressed and calls fail immediately.
 
 "Always allow" and "Always deny" buttons on the consent modal persist the decision per-script per-tool until the user resets it in extension Settings. These overrides are stored with the script and included in encrypted sync when enabled. The extension evaluates them for each call; MCP cannot set them or grant itself Full access.
@@ -321,7 +313,7 @@ Users can visually select elements in the browser, and the extension pushes cont
 
 Use `get_selected_elements` to retrieve selections programmatically, or read the pushed `.dom.md` files directly from the workspace.
 
-Each selection includes **bulletproof tiered selectors** (stable IDs → data attributes → ARIA → semantic classes → structural positioning) so targeting survives page updates.
+Each selection includes **stable, tiered selectors** (stable IDs → data attributes → ARIA → semantic classes → structural positioning) so targeting is more likely to survive page updates.
 
 ## Workflows
 
@@ -385,7 +377,7 @@ Once `sync_scripts` has been called, the MCP server watches the directory for `.
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
-| `CUSTOMAISE_WS_PORT` | `4050` | WebSocket server port |
+| `CUSTOMAISE_WS_PORT` | `4050` | WebSocket server port. The extension always connects to 4050, so change this only for tests |
 | `CUSTOMAISE_MCP_EXTRA_EXTENSION_IDS` | _(empty)_ | Comma-separated list of extra extension IDs allowed to connect. Needed for unpacked dev builds with a non-standard extension ID |
 | `CUSTOMAISE_MCP_ALLOW_INSECURE` | _(unset)_ | Set to `1` to disable the origin allowlist. **Tests only.** Emits a loud warning at startup |
 | `CUSTOMAISE_WORKSPACE` | _(cwd)_ | Absolute path where `.customaise/` files should be written. Useful for IDEs that don't set cwd to the project root (Claude Desktop, Antigravity) |
@@ -442,30 +434,9 @@ directories, not that the model can read them. It is also unavailable on
 2026-07-28 connections. An explicit flag with a self-advertising
 fallback beats a heuristic that is confidently wrong.
 
-## Publishing the public mirror
+## Source
 
-This package is developed in a private monorepo and mirrored to
-[getcustomaise/customaise-mcp](https://github.com/getcustomaise/customaise-mcp),
-which is what `package.json` `repository` points at and what MCP scanners
-and directories read. Keep them in step with the sync script rather than by
-hand: the previous hand-copy shipped 7 of 21 source files, so the published
-repo did not compile and carried none of the test suites.
-
-```bash
-npm run mirror:plan                     # what would be published, as JSON
-npm run mirror:verify -- ../customaise-mcp   # drift report, exit 1 if adrift
-npm run mirror:apply  -- ../customaise-mcp   # copy the plan over a checkout
-```
-
-`mirror:apply` writes into a clone, deletes files this package no longer
-ships, and leaves the repo's own `.github/` furniture alone. It never
-pushes. Review `git diff` in the checkout and push yourself.
-
-The plan is built from `git ls-files`, so anything uncommitted is invisible
-to it. The script refuses to run while untracked files exist under `mcp/`
-rather than publishing a tree that is missing them. `src/__tests__/public-mirror.test.ts`
-guards the shape of the plan in CI; the drift check needs a checkout and so
-stays a release step.
+This repository mirrors the package source from Customaise's own monorepo at each release.
 
 ## Security Boundary
 
@@ -486,11 +457,9 @@ Scripts you wrote yourself, and scripts you subscribed to from the marketplace, 
 
 **Dev builds**: if you load an unpacked extension with a custom key, set `CUSTOMAISE_MCP_EXTRA_EXTENSION_IDS=<your-extension-id>` in the MCP server's env.
 
-## CLI
+## Sharing scripts
 
-### Share scripts through the extension
-
-In extension **1.3.7**, open **Quick Actions → Share Script** on an owned
+Open **Quick Actions → Share Script** on an owned
 UserScript or AgentScript. **Publish & share** keeps the hosted, read-only
 subscription flow with publisher updates. **Send** creates a **24-hour link**
 to an independent editable copy. Sending requires Power User; receiving works
@@ -505,6 +474,18 @@ before sending: secrets embedded there remain included. Saved account keys,
 GM values, browser logins, tool approvals and Script Decisions provider choices
 are not copied. Each recipient configures their own access and provider.
 Fork a subscription before modifying or sending an independent copy.
+
+## CLI
+
+### Let an agent set up the CLI
+
+In extension **Settings → MCP & Terminal → Quick Setup → Terminal**, copy the
+setup prompt for Codex, Claude Code or another shell agent. The **Grok Bot** tab
+has a prompt for installing the CLI on the Bot's own computer. Both prompts
+verify Node.js, install the current published package, run `doctor`, add the
+project primer with `init`, and read the conventions before script work.
+The [CLI guide](https://customaise.com/learn/cli) and
+[Grok Bot guide](https://customaise.com/learn/grok-bot) provide the same prompts.
 
 ### Terminal setup
 
@@ -630,12 +611,11 @@ so a stream of replacements cannot create unbounded background work.
 ## Requirements
 
 - **Node.js** ≥ 20
-- **Chrome** with the Customaise extension installed (≥ 1.2.3 for the v2 bridge protocol; older extensions still work but don't surface the cap-usage display)
-- **MCP Bridge** enabled in Customaise Settings (free, signed-in)
+- **Chrome 147 or later** with Customaise (1.3.9 is the tested pair for 3.2.8), signed in, with **Agent Bridge** on.
 
 ## Plan tiers
 
-The MCP Bridge is free for any signed-in Customaise user. Free use is capped at **50 calls per UTC day** and **150 calls per rolling 7-day window**. **Power User** unlocks unlimited MCP. The cap covers every successful tool dispatch (built-in tools and WebMCP calls alike); failed calls and protocol-level traffic don't count.
+The Agent Bridge is free for any signed-in Customaise user. Free use is capped at **50 calls per UTC day** and **150 calls per rolling 7-day window**. **Power User** unlocks unlimited MCP. The cap covers every successful tool dispatch (built-in tools and WebMCP calls alike); failed calls and protocol-level traffic don't count.
 
 When the cap fires, the server returns a JSON-RPC error with code `-40029` and a human-readable message + structured `data` carrying scope, used/limit, and reset timestamp. IDEs that surface tool errors render the message verbatim. Sign-in is required regardless of tier; without a fresh Firebase ID token the server returns `-40028 MCP_AUTH_REQUIRED`. Branch on `structuredContent.error.type`, never on the number: the codes moved once already (3.2.0 took them out of the range the 2026-07-28 specification reserved for itself; the old `-3202x` values are still accepted from older extensions), the type strings did not.
 
@@ -643,11 +623,11 @@ When the cap fires, the server returns a JSON-RPC error with code `-40029` and a
 
 **"Customaise extension is not connected"**
 - Make sure Chrome is running with the Customaise extension.
-- Check that MCP Bridge is enabled in extension Settings.
+- Check that **Agent Bridge** is on in Settings → MCP & Terminal.
 - The extension connects automatically within a few seconds.
 
 **Port conflict on 4050**
-- Set a different port: `CUSTOMAISE_WS_PORT=4051 npx @customaise/mcp`.
+- The extension always connects to localhost:4050. Find what holds the port with `lsof -i :4050` and stop it. `CUSTOMAISE_WS_PORT` is for tests.
 
 **Scripts not running after export**
 - Call `reload_tab` to trigger script re-injection.
