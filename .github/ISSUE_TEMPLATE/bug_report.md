@@ -12,8 +12,10 @@ A clear description of what the bug is.
 **Environment**
 - OS: [e.g. macOS 15, Windows 11, Ubuntu 24]
 - Node.js version: [e.g. 22.x]
-- IDE: [e.g. Cursor, Claude Code, Windsurf, Antigravity]
-- MCP package version: [e.g. 2.0.7]
+- Agent or IDE: [e.g. Claude Code, Cursor, Codex, Kiro, Antigravity, Claude Desktop]
+- MCP package version: [run customaise --version, e.g. 3.2.8]
+- Customaise extension version: [e.g. 1.3.9, in extension Settings]
+- Chrome version: [e.g. 149, from chrome://version]
 
 **Steps to reproduce**
 1. Configure MCP server with `npx -y @customaise/mcp`
