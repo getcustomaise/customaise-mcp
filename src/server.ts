@@ -1,7 +1,7 @@
 import { SCRIPT_DECISIONS_CONVENTIONS } from './script-decisions-guide.js';
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
 import { z } from 'zod';
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
@@ -47,8 +47,15 @@ import {
   inlineImageBudgetBytes,
   parseDataUrl,
   outputParamDescription,
+  payloadBytes,
   pruneToBudget,
   resolveDelivery,
+  staleToolResults,
+  TOOL_RESULT_FILE_HINT,
+  TOOL_RESULT_OUTPUT_DESCRIPTION,
+  toolResultFileName,
+  toolResultInlineHint,
+  toolResultSummary,
 } from './context-delivery.js';
 
 /**
@@ -75,6 +82,52 @@ export function asStructuredContent(result: unknown): Record<string, unknown> {
   const keys = Object.keys(result as Record<string, unknown>);
   if (keys.length === 1 && keys[0] === 'result') return { result };
   return result as Record<string, unknown>;
+}
+
+const DECISIONS_PROVIDERS: Record<string, string> = { jev: 'Jev', 'openai-decisions': 'Decisions API' };
+
+/**
+ * One sentence on what an agent's save did to the script's Script Decisions
+ * provider, read from export_script's `scriptDecisions` (extension 1.4.0):
+ * `{ provider, kept, reason?, pausedReason? }`. Null when the extension
+ * reported nothing, as it does for a script that does not use CM_decisions.
+ */
+export function scriptDecisionsAfterEdit(value: unknown): string | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const { provider, kept, reason, pausedReason } = value as Record<string, unknown>;
+  const name = typeof provider === 'string' ? DECISIONS_PROVIDERS[provider] ?? provider : null;
+  if (kept === true) return `Script Decisions: ${name ?? 'the provider'} stays chosen for the new code.`;
+  if (reason === 'no_provider') return 'Script Decisions: no provider is chosen for this script yet.';
+  if (!name || reason === 'connection_uncertain') {
+    const code = typeof reason === 'string' && reason !== 'connection_uncertain' ? ` (${reason})` : '';
+    return `Script Decisions: Customaise could not confirm whether the provider was kept for the new code${code}. Check with get_script_decisions.`;
+  }
+  const lost = `Script Decisions: ${name} was not kept for the new code`;
+  switch (reason) {
+    case 'agent_access_off':
+    case 'permission_mode_changed':
+    case 'permission_mode_unavailable':
+      return `${lost}: Script Decisions is not turned on for agents, so the person chooses the provider again in the script's Decisions menu.`;
+    case 'paused':
+      return pausedReason === 'loop_repeat'
+        ? `${lost}: the loop guard paused the script for repeating the same input. Choosing the provider again with set_script_decisions resumes it.`
+        : `${lost}: the script is paused${pausedReason === 'loop_runaway' ? ' for a runaway loop' : ''}. Only the person can resume it, from the script's Decisions menu.`;
+    case 'device_changed':
+      return `${lost}: this device's Script Decisions access changed since it was chosen. Choose it again with set_script_decisions, or the person does in the script's Decisions menu.`;
+    case 'not_current':
+      return `${lost}: it was already waiting to be chosen again before this edit. Choose it again with set_script_decisions.`;
+    case 'script_unavailable':
+      return `${lost}: the script is turned off. Turn it on, then choose the provider again with set_script_decisions.`;
+    case 'declaration_required':
+    case 'invalid_task':
+      return `${lost}: the new code's question lists have problems. get_script_decisions lists them.`;
+    case 'version_held':
+      return `${lost}: the version the person holds for this script cannot answer its new questions. Only they can choose another, in the script's Decisions menu.`;
+    case 'version_unsupported':
+      return `${lost}: no version of ${name} answers the new questions. Choose another provider with set_script_decisions.`;
+    default:
+      return `${lost} (${String(reason)}). Check with get_script_decisions.`;
+  }
 }
 
 
@@ -283,10 +336,10 @@ IMPORTANT: Save files inside your current workspace or project directory (e.g., 
               };
             });
 
-  server.registerTool('export_script', { description: `Export a script from a local file into Customaise. The file will be validated through Customaise's sanitization pipeline (syntax checking, AST validation, security analysis). If valid, the script is installed and ready to execute on matching pages. If invalid, detailed diagnostics explain exactly what to fix. Pass scriptId to update an existing script instead of creating a new one. Pass expectedCodeHash from import_script to reject stale edits. Save progress includes an operation ID and stage. A timeout may leave the outcome unknown: query get_bridge_status with the scriptId and operationId from the error before retrying. The extension enforces a 90-second save deadline and cancels work that has not reached persistence. A storage write already submitted cannot be recalled; its commit receipt resolves that uncertainty. NOTE: You cannot overwrite a shared/subscribed script — they are read-only. If you need to edit a shared script, first call import_script with fork:true (creates an editable independent copy), then export to that copy's scriptId.
+  server.registerTool('export_script', { description: `Export a script from a local file into Customaise. The file will be validated through Customaise's sanitization pipeline (syntax checking, AST validation, security analysis). If valid, the script is installed and ready to execute on matching pages. If invalid, detailed diagnostics explain exactly what to fix. Pass scriptId to update an existing script instead of creating a new one. Pass expectedCodeHash from import_script to reject stale edits. Save progress includes an operation ID and stage. A timeout may leave the outcome unknown: query get_bridge_status with the scriptId and operationId from the error before retrying. The extension enforces a 90-second save deadline and cancels work that has not reached persistence. A storage write already submitted cannot be recalled; its commit receipt resolves that uncertainty. For a script that uses CM_decisions, scriptDecisions in the result says whether its Script Decisions provider stays chosen for the new code, and if not, why and what to do. NOTE: You cannot overwrite a shared/subscribed script — they are read-only. If you need to edit a shared script, first call import_script with fork:true (creates an editable independent copy), then export to that copy's scriptId.
 
     Reminder for new UserScripts: Prefer named functions in an IIFE for symbol-level editing; preserve valid imported source, \`// @namespace https://customaise.com\`, and standard directives (@name, @match, @grant).
-    Reminder for AgentScripts: MUST use \`// ==AgentScript==\` block, MUST explicitly declare tools via \`// @webmcp <toolName> <permission>\` (e.g. \`// @webmcp my_tool prompt\`). Permissions: allow (autonomous), prompt (interactive), deny (blocked). Prefer \`prompt\`: in a script you write, \`allow\` resolves as \`prompt\` before user grants are applied; a saved Allow rule or user-enabled Full access can permit it. Prefer named top-level functions and top-level tool registration for symbol editing; IIFEs are supported. CAN use GM_* APIs for persistence, networking, and observability alongside \`navigator.modelContext.registerTool()\`.`, inputSchema: z.object({
+    Reminder for AgentScripts: MUST use \`// ==AgentScript==\` block, MUST explicitly declare tools via \`// @webmcp <toolName> <permission>\` (e.g. \`// @webmcp my_tool prompt\`). Permissions: allow (autonomous), prompt (interactive), deny (blocked). Prefer \`prompt\`: in a script you write, \`allow\` resolves as \`prompt\` before user grants are applied; a saved Allow rule or user-enabled Full access can permit it. Prefer named top-level functions and top-level tool registration for symbol editing; IIFEs are supported. CAN use GM_* APIs for persistence, networking, and observability alongside \`document.modelContext.registerTool()\`.`, inputSchema: z.object({
               filePath: z.string().describe('Local file path containing the userscript source code'),
               scriptId: z.string().optional().describe('ID of an existing script to update. Omit to create a new script.'),
               expectedCodeHash: z.string().regex(/^[a-f0-9]{64}$/).optional().describe('SHA-256 from import_script. Reject the save if the installed source has changed since that read.')
@@ -304,6 +357,14 @@ IMPORTANT: Save files inside your current workspace or project directory (e.g., 
                 throw err;
               }
                 const gate = checkUserScriptsGate();
+              // Whether the script kept its Script Decisions provider for the
+              // new code. One line for the model; the same sentence rides in
+              // `scriptDecisions.message` for a CLI reading the JSON.
+              const saved = result as Record<string, unknown> | null;
+              const decisions = scriptDecisionsAfterEdit(saved?.scriptDecisions);
+              const structured = decisions
+                ? { ...saved, scriptDecisions: { ...(saved!.scriptDecisions as Record<string, unknown>), message: decisions } }
+                : result;
               return {
                 // Two readers, two halves. The model reads `content`, where the
                 // master-gate banner belongs because it is advice a human
@@ -312,10 +373,10 @@ IMPORTANT: Save files inside your current workspace or project directory (e.g., 
                 // `JSON.parse` fail, so the CLI emitted the whole ASCII
                 // banner as its data. That fires whenever the "Allow user
                 // scripts" toggle is off, i.e. after every Chrome restart.
-                structuredContent: withGate(result, gate),
+                structuredContent: withGate(structured, gate),
                 content: [{
                   type: 'text' as const,
-                  text: gate.warning + JSON.stringify(result, null, 2)
+                  text: gate.warning + (decisions ? decisions + '\n\n' : '') + JSON.stringify(result, null, 2)
                 }]
               };
             });
@@ -350,6 +411,70 @@ IMPORTANT: Save files inside your current workspace or project directory (e.g., 
                   type: 'text' as const,
                   text: gate.warning + JSON.stringify(result, null, 2)
                 }]
+              };
+            });
+
+  // ─── Script Decisions ───────────────────────────────────────────────
+  // An agent chooses a script's provider only under the person's grant:
+  // Agent permissions → Full access → Script Decisions, which no tool can
+  // turn on. The extension decides every refusal and names it in `data.type`
+  // (person_required, rejected, not_found, ...) and `data.code`; both pass
+  // through untouched, so the CLI exits on the type.
+
+  /** The first extension with both Script Decisions commands. */
+  const SCRIPT_DECISIONS_MIN_EXTENSION = '1.4.0';
+
+  /**
+   * Dispatch a bridge command the connected extension may predate.
+   *
+   * An extension built before a command existed answers
+   * `Unknown MCP request type: <command>` with no type. The envelope would
+   * call that internal_error and the CLI would exit 1, which reads as a fault
+   * to report when the fix is an update, so say which version has it.
+   */
+  async function dispatchNeedingExtension(command: string, args: Record<string, unknown>, minExtensionVersion: string): Promise<unknown> {
+    try {
+      return await bridge.dispatchTool(command, args);
+    } catch (error) {
+      const err = error as { message?: unknown; data?: { type?: unknown } } | null;
+      if (err?.data?.type === undefined && err?.message === `Unknown MCP request type: ${command}`) {
+        throw Object.assign(new Error(
+          `${command} needs Customaise ${minExtensionVersion} or later, and the connected extension is older. `
+          + 'Ask the person to update the extension from chrome://extensions, then try again.'),
+          { data: { type: 'extension_outdated', minExtensionVersion, command } });
+      }
+      throw error;
+    }
+  }
+
+  server.registerTool('get_script_decisions', { description: `Read Script Decisions on this device: the typed decisions scripts make through @grant CM_decisions. Returns whether agents may manage it (agentAccess.scriptDecisions; the person turns it on under Full access in Customaise Settings, Agent permissions), sign-in and plan (Power User is required), whether this device is allowed (deviceEnabled) or paused (locallyPaused), which provider keys are saved, and every script that uses CM_decisions or has a provider: its provider (jev, openai-decisions or null) and state, one of ready, off, choose_again (its code or this device changed since the provider was chosen; reason says which), paused (pausedReason loop_repeat or loop_runaway) or invalid (issue). chosenByAgent marks a provider an agent chose. With scriptId it also returns that script's question lists (sets: hash, enabled, questions), the problems found in its code (issues, with line numbers) and today's decisions on this device (rowsToday). Use it before set_script_decisions, which names question lists by these hashes, and after export_script to check a script's provider. Reads only; nothing is sent to a provider. Needs extension 1.4.0 or later.`, inputSchema: z.object({
+              scriptId: z.string().min(1).max(128).optional().describe('A script ID from list_scripts. Omit to list every script that uses CM_decisions or has a provider.')
+            }), annotations: { title: 'Get Script Decisions', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } }, async ({ scriptId }) => {
+              const result = await dispatchNeedingExtension('get_script_decisions', scriptId === undefined ? {} : { scriptId }, SCRIPT_DECISIONS_MIN_EXTENSION);
+              return {
+                structuredContent: asStructuredContent(result),
+                content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }]
+              };
+            });
+
+  server.registerTool('set_script_decisions', { description: `Choose the Script Decisions provider for one script on this device: jev, openai-decisions (Decisions API), or off. Once a provider is chosen, the script's CM_decisions calls run without asking and are billed to the person's saved key for that provider, so choose one only when the person wants it. sets switches On exactly the question lists it names, by the hashes get_script_decisions returns for this scriptId, and every other list Off. Without sets, unchanged code keeps its On/Off choices and changed code switches every list On. Choosing a provider again also resumes a script the loop guard paused for repeating the same input (pausedReason loop_repeat).
+
+Choosing jev or openai-decisions needs the person to have turned on Script Decisions under Full access in Customaise Settings, Agent permissions; only they can, in the extension. Switching a script off is always allowed. These stay with the person: provider keys, this device's Allow Script Decisions switch, daily limits, pausing this device, a script paused for a runaway loop (loop_runaway), and scripts shared with them. When the error type is person_required, tell the person the next step the message names and do not retry. Other refusals carry type rejected, not_found, auth_required or invalid_argument, with the precise reason in code. After service_unavailable or a timeout the outcome is uncertain: read the state with get_script_decisions before trying again. Returns the script's state as get_script_decisions does for one script. Needs extension 1.4.0 or later.`, inputSchema: z.object({
+              scriptId: z.string().min(1).max(128).describe('The script ID, from list_scripts or get_script_decisions.'),
+              provider: z.enum(['jev', 'openai-decisions', 'off']).describe('jev, openai-decisions (Decisions API), or off to switch the script provider off.'),
+              sets: z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(200).optional().describe('Hashes of the question lists to switch On, from get_script_decisions with this scriptId; every other list goes Off. Only with jev or openai-decisions. Omit to keep the current choices for unchanged code.')
+            }), annotations: { title: 'Set Script Decisions', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false } }, async ({ scriptId, provider, sets }) => {
+              // Refused here as well as in the extension, so a malformed call
+              // never costs a dispatch.
+              if (provider === 'off' && sets !== undefined) {
+                throw Object.assign(new Error('sets only goes with jev or openai-decisions. To switch the script off, pass provider "off" without sets.'),
+                  { data: { type: 'invalid_argument' } });
+              }
+              const result = await dispatchNeedingExtension('set_script_decisions',
+                { scriptId, provider, ...(sets === undefined ? {} : { sets }) }, SCRIPT_DECISIONS_MIN_EXTENSION);
+              return {
+                structuredContent: asStructuredContent(result),
+                content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }]
               };
             });
 
@@ -795,7 +920,7 @@ IMPORTANT: Save files inside your current workspace or project directory (e.g., 
               };
             });
 
-  server.registerTool('get_bridge_status', { description: `Report the bridge's own state: whether the extension is attached, the plan tier, whether you are signed in, whether remote approvals are enabled, and how much of the MCP cap is left today and this week. Costs NO cap units. Without scriptId it reads cached bridge state; with scriptId it queries the browser for the latest save status and durable commit receipt. After a timeout, inspect that status before retrying. Unknown means no retained proof, not proof of failure. Check this before a long run so you find out you have three calls left now rather than mid-task.`, inputSchema: z.object({
+  server.registerTool('get_bridge_status', { description: `Report the bridge's own state: whether the extension is attached, the plan tier, whether you are signed in, whether remote approvals are enabled, the browser's agent permissions (agentPermissions: Full access, and scriptDecisions, whether agents may choose Script Decisions providers), and how much of the MCP cap is left today and this week. Costs NO cap units. Without scriptId it reads cached bridge state; with scriptId it queries the browser for the latest save status and durable commit receipt. After a timeout, inspect that status before retrying. Unknown means no retained proof, not proof of failure. Check this before a long run so you find out you have three calls left now rather than mid-task.`, inputSchema: z.object({
               scriptId: z.string().min(1).max(256).optional().describe('Optionally inspect the latest save for this script; reads the browser without spending a cap unit.'),
               operationId: z.string().min(1).max(128).optional().describe('Save operation ID from export progress or a timeout. Requires scriptId.')
             }), annotations: { title: 'Bridge status', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } }, async ({ scriptId, operationId }) => {
@@ -810,18 +935,19 @@ IMPORTANT: Save files inside your current workspace or project directory (e.g., 
             });
 
 
-  server.registerTool('call_webmcp_tool', { description: 'Execute a registered WebMCP tool directly on the target browser tab. If the tool is interactive (trust level), the user will be natively prompted by CustomAIse to approve the execution before it returns. Approval can take minutes when the user is away from the browser (remote approvals on a phone). This server sends progress notifications while it waits, so a client that resets its timeout on progress will wait with it. A client that caps tool calls at a fixed 60 seconds regardless will report this call as failed while the user can still approve it and the tool can still run; if that happens, do not blindly re-issue a call with side effects. Check the outcome first with a read-only tool or the page itself.', inputSchema: z.object({
+  server.registerTool('call_webmcp_tool', { description: 'Execute a registered WebMCP tool directly on the target browser tab. If the tool is interactive (trust level), the user will be natively prompted by CustomAIse to approve the execution before it returns. Approval can take minutes when the user is away from the browser (remote approvals on a phone). This server sends progress notifications while it waits, so a client that resets its timeout on progress will wait with it. A client that caps tool calls at a fixed 60 seconds regardless will report this call as failed while the user can still approve it and the tool can still run; if that happens, do not blindly re-issue a call with side effects. Check the outcome first with a read-only tool or the page itself. A result over 64 KB WRITES A FILE by default: the whole result goes to .customaise/tool-results/ in your workspace, which keeps the newest 20, and this call returns the path with the result\'s small values. If you have no filesystem tool, pass output: "inline" to get it in the response with long lists shortened instead.', inputSchema: z.object({
               tabId: z.number().optional().describe('Tab ID to execute on. Defaults to active tab.'),
               toolName: z.string().describe('The EXACT name of the WebMCP tool to invoke'),
-              toolArgs: z.record(z.string(), z.any()).optional().describe('JSON object of arguments for the tool')
-            }), annotations: { title: 'Call WebMCP tool', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true } }, async ({ tabId, toolName, toolArgs }) => {
+              toolArgs: z.record(z.string(), z.any()).optional().describe('JSON object of arguments for the tool'),
+              output: z.enum(['auto', 'file', 'inline']).optional().describe(TOOL_RESULT_OUTPUT_DESCRIPTION)
+            }), annotations: { title: 'Call WebMCP tool', readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true } }, async ({ tabId, toolName, toolArgs, output }) => {
               // Gate check FIRST. call_webmcp_tool against a snoozing extension
               // will error with "tool not registered" — surfacing the gate here
               // tells the agent why the error is happening BEFORE the dispatch
               // returns its no-such-tool failure.
               const gate = checkUserScriptsGate();
               const result = await bridge.dispatchTool('call_webmcp_tool', { tabId, toolName, toolArgs });
-              return {
+              const reply = (payload: unknown) => ({
                 // Two readers, two halves. The model reads `content`, where the
                 // master-gate banner belongs because it is advice a human
                 // needs relayed. A CLI parses `structuredContent`, which must
@@ -829,12 +955,64 @@ IMPORTANT: Save files inside your current workspace or project directory (e.g., 
                 // `JSON.parse` fail, so the CLI emitted the whole ASCII
                 // banner as its data. That fires whenever the "Allow user
                 // scripts" toggle is off, i.e. after every Chrome restart.
-                structuredContent: withGate(result, gate),
+                structuredContent: withGate(payload, gate),
                 content: [{
                   type: 'text' as const,
-                  text: gate.warning + JSON.stringify(result, null, 2)
+                  text: gate.warning + JSON.stringify(payload, null, 2)
                 }]
-              };
+              });
+
+              // Most results fit, and come back exactly as the page tool
+              // returned them. One over the budget is delivered the way the
+              // context tools deliver theirs (see context-delivery.ts), and
+              // never in a way that needs the tool run again to recover it.
+              const budget = inlineBudgetBytes();
+              if (payloadBytes(result) <= budget) return reply(result);
+              const delivery = resolveDelivery(output);
+
+              // As in get_page_context: the tool has run and its result is in
+              // hand, so a workspace that cannot be written falls back to
+              // inline instead of discarding it.
+              let fileWriteError: string | undefined;
+              if (delivery.mode === 'file') {
+                try {
+                  const resultsDir = join(getWorkspaceDir(), '.customaise', 'tool-results');
+                  mkdirSync(resultsDir, { recursive: true });
+                  const filePath = join(resultsDir, toolResultFileName(toolName, new Date(), randomUUID().slice(0, 8)));
+                  const fullJson = JSON.stringify(result, null, 2);
+                  writeFileSync(filePath, fullJson, 'utf-8');
+                  for (const name of staleToolResults(readdirSync(resultsDir))) {
+                    try { unlinkSync(join(resultsDir, name)); } catch { /* already gone */ }
+                  }
+                  return reply({
+                    delivery: 'file' as const,
+                    deliverySource: delivery.source,
+                    tool: toolName,
+                    filePath,
+                    fileSizeKB: asKB(Buffer.byteLength(fullJson, 'utf-8')),
+                    summary: toolResultSummary(result),
+                    hint: TOOL_RESULT_FILE_HINT,
+                  });
+                } catch (fsErr) {
+                  fileWriteError = (fsErr as Error)?.message || String(fsErr);
+                }
+              }
+
+              const pruned = pruneToBudget(result, budget);
+              return reply({
+                delivery: 'inline' as const,
+                deliverySource: fileWriteError ? ('file-write-fallback' as const) : delivery.source,
+                wroteFile: false,
+                ...(fileWriteError ? { fileWriteError } : {}),
+                tool: toolName,
+                sizeKB: asKB(pruned.bytes),
+                truncated: pruned.omissions.length > 0,
+                omitted: pruned.omissions,
+                result: pruned.value,
+                hint: (fileWriteError
+                  ? `Writing to the workspace failed (${fileWriteError}), so the result is returned inline instead of being discarded. Fix the workspace path (CUSTOMAISE_WORKSPACE for an IDE server, the directory you ran from for the CLI) or its permissions to get file delivery back. `
+                  : '') + toolResultInlineHint(pruned.omissions),
+              });
             });
 
   // ─── File Sync ──────────────────────────────────────────────────────
@@ -923,7 +1101,7 @@ IMPORTANT: Save files inside your current workspace or project directory (e.g., 
 
   // ─── DOM Selection Bridge ──────────────────────────────────────────
 
-  server.registerTool('get_selected_elements', { description: 'Get DOM elements that the user has visually selected in the browser for a specific script. Returns each selection\'s bulletproof selectors, element context, and user comments. Returns the selections in this response, so it needs no filesystem access. WRITES FILES only when you pass writeFiles: true, which saves .dom.md context files under the directory you name. Use CM_findElement with the domId for precise targeting in scripts. When MCP is connected, .dom.md context files and screenshots are automatically pushed to the workspace (.customaise/dom-context/<script-name>/) in real-time as the user selects elements. Use this tool to retrieve selections if the auto-pushed files are missing or to get the raw JSON data.', inputSchema: z.object({
+  server.registerTool('get_selected_elements', { description: 'Get DOM elements that the user has visually selected in the browser for a specific script. Returns each selection\'s stable, tiered selectors, element context, and user comments. Returns the selections in this response, so it needs no filesystem access. WRITES FILES only when you pass writeFiles: true, which saves .dom.md context files under the directory you name. Use CM_findElement with the domId for precise targeting in scripts. When MCP is connected, .dom.md context files and screenshots are automatically pushed to the workspace (.customaise/dom-context/<script-name>/) in real-time as the user selects elements. Use this tool to retrieve selections if the auto-pushed files are missing or to get the raw JSON data.', inputSchema: z.object({
               scriptId: z.string().optional().describe('Script ID to get selections for. Omit to get all scripts\' selections.'),
               writeFiles: z.boolean().optional().describe('If true, writes .dom.md context files to the workspace directory. Default: false.'),
               directory: z.string().optional().describe('Workspace directory for .dom.md files. Required if writeFiles is true.')
@@ -1259,7 +1437,7 @@ export function registerPromptsAndResources(server: McpServer, bridge: Bridge): 
     'script-decisions',
     'customaise://script-decisions',
     {
-      description: 'Script Decisions: questions written in the code, the CM_decisions API, a working example, setup, billing and safe failure handling for both script engines.',
+      description: 'Script Decisions: questions written in the code, the CM_decisions API, a working example, setup, choosing providers with get_script_decisions and set_script_decisions, billing and safe failure handling for both script engines.',
       mimeType: 'text/markdown',
       cacheHint: { ttlMs: 60 * 60 * 1000 }
     },
@@ -1359,7 +1537,7 @@ For new scripts, prefer **named functions** inside an IIFE for symbol-level edit
 | \`@namespace\` | Recommended | Script namespace. Use \`https://customaise.com\`. |
 | \`@author\` | Optional | Script author |
 
-## CM_findElement (Bulletproof DOM Targeting)
+## CM_findElement (Tiered DOM Targeting)
 Customaise resolves saved element selections through several selector strategies. These help with changing classes and layout, but a changed or missing target can still fail. Check the result against the current page and handle a missing element.
 
 **Usage:**
@@ -1655,8 +1833,9 @@ Check these before deciding a script is broken:
 - **Blocked sources.** \`@require\` and \`@resource\` addresses on the user's Blocked sources never load. By default the list holds \`example.com\`, so load libraries from elsewhere.
 - **Private windows.** By default private windows share a temporary copy of each script's saved values, which ends when the last private window closes. Private downloads stay out of normal history.
 - **Browser setup.** Local UserScripts run on Free, signed out and without Agent Bridge. Enable Allow user scripts in Customaise's Chrome extension Details; check the individual script switch as well. Use https://customaise.com/connect/ to diagnose setup.
-- **Browser requirement.** Customaise 1.3.9 requires Chrome 147 or later, matching the tested release baseline. \`@unwrap\` and \`@run-at context-menu\` are supported in that baseline. Firefox containers, Firefox-only globals and E4X syntax are not provided.
+- **Browser requirement.** Customaise 1.3.9 and later require Chrome 147 or later, matching the tested release baseline. \`@unwrap\` and \`@run-at context-menu\` are supported in that baseline. Firefox containers, Firefox-only globals and E4X syntax are not provided.
 - **Execution timing.** All five \`@run-at\` modes are supported. Their order is respected, but \`document-start\` cannot guarantee running before every website script. Handle a DOM that changes after injection.
+- **Plain http pages.** On an http page served by anything but localhost (a LAN server, an intranet name, an IP address) Chrome withholds secure-context APIs from the page and from the script: \`crypto.randomUUID\`, \`crypto.subtle\`, \`navigator.clipboard\` and \`navigator.mediaDevices\` are undefined there. GM APIs work on these pages. Copy with \`GM_setClipboard\`, make ids from \`crypto.getRandomValues\`, and don't test such a script only on localhost, which counts as secure.
 - **Edits pause updates.** Saving changes to an installed script that updates from a URL pauses its automatic updates, as a person's edit does.
 
 ## Importing and maintaining a library (extension 1.3.9)
@@ -1666,7 +1845,7 @@ Check these before deciding a script is broken:
 - **Page access:** default Script isolation is In the page with a scoped window. Read page variables through \`unsafeWindow\`. Do not assume \`@sandbox DOM\` forces isolation under that default; the user's Script isolation choice controls it.
 - **Local dependencies:** \`file://\` \`@require\` and \`@resource\` need Chrome's Allow access to file URLs and the local-file option. Files are read again on the next page load, not live-replaced on an already open page. A missing local library reports a warning; invalid local JavaScript prevents execution until fixed, then the next page load retries it.
 - **Updates:** local edits pause automatic updates. A manual update asks before replacing those edits. In 1.3.9 the updater also restores headers that 1.3.7/1.3.8 had rewritten.
-- **Network:** under the default option, no \`@connect\` entries or \`*\` asks about each new host. Specific entries refuse unlisted hosts; \`none\` keeps only the page's own host. IPv6 literals are supported: \`[::1]\` or bare \`::1\` declares a host, \`[::1]:8080\` only that port, with equivalent IPv6 spellings normalized. Downloads from undeclared hosts ask first. Never bypass a refused request or change permission settings to make a test pass.
+- **Network:** under the default option, no \`@connect\` entries or \`*\` asks about each new host. Specific entries refuse unlisted hosts; \`none\` keeps only the page's own host. Each entry names a host as written, in lower case: a domain covers itself and its subdomains on any port; \`localhost\`, an IP address or a bracketed IPv6 address (\`[::1]\`) only that host. A wildcard such as \`*.example.com\`, a port, a whole URL or a pattern matches nothing. Downloads from undeclared hosts ask first. Never bypass a refused request or change permission settings to make a test pass.
 - **Request results:** handle load, error, abort and timeout separately. Compressed responses are decoded; large responses are delivered in order and joined before completion. Missing transfer data is an error, not successful truncated output. This is not an unlimited-memory or speed guarantee. \`responseHeaders\` includes Set-Cookie; HttpOnly cookie headers require \`GM_cookie\`. Use \`GM.xmlHttpRequest\` for Promise completion (with its abort handle), and the documented callbacks for classic \`GM_xmlhttpRequest\`.
 - **Validate the workflow:** install → review/enable → reload the matching page → check the visible effect, saved values and request results → reload/reuse. Browser restart, navigation and back/forward restoration should not require reinstalling the script. Do not translate selected regression results into universal Tampermonkey compatibility.
 
@@ -1683,11 +1862,11 @@ For paid typed decisions inside this script, read customaise://script-decisions 
 
 ${SCRIPT_SHARING_CONVENTIONS}
 
-AgentScripts inject WebMCP tools onto any web page via \`navigator.modelContext\`.
+AgentScripts inject WebMCP tools onto any web page via \`document.modelContext\`, the WebMCP standard name since Chrome 150. Customaise 1.4.0 and later provide it. There \`navigator.modelContext\`, its earlier name, is the same object, and it works in every Customaise version: use it when a script must also run on an older Customaise.
 
 ## Setup & environment
 
-**No Chrome flag required.** Customaise ships a polyfill of \`navigator.modelContext\` that runs on stable Chromium today. The Chrome \`#enable-webmcp-testing\` flag is OPTIONAL — it only matters if the user wants third-party WebMCP-spec inspector tools to introspect Customaise's tool registry. The Customaise stack itself (the in-extension AI, the Agent Bridge, every \`@webmcp\`-declared tool) works flag-off.
+**No Chrome flag required.** Customaise ships a polyfill of \`document.modelContext\` and \`navigator.modelContext\` that runs on stable Chromium today. The Chrome \`#enable-webmcp-testing\` flag is OPTIONAL: it only matters if the user wants third-party WebMCP-spec inspector tools to introspect Customaise's tool registry. The Customaise stack itself (the in-extension AI, the Agent Bridge, every \`@webmcp\`-declared tool) works flag-off. With the flag on, Customaise also registers each AgentScript tool in Chrome's own registry, so Chrome's agent and inspector tools see it; a call from there still goes through Customaise's approval.
 
 **The "two sides" mental model.** Customaise has a browser side and an agent side. The daemon and Chrome must run on the same computer because the bridge uses localhost:
 - **The hands: the user's daily Chrome** (or Edge / Brave / any Chromium). Where Customaise is installed, where the user is signed in to the target sites (bank, CRM, internal Jira, etc.), and where AgentScripts inject.
@@ -1701,10 +1880,12 @@ The two sides meet over a WebSocket on \`localhost:4050\`, served by the Customa
 3. Enable the intended AgentScript in Customaise’s Scripts panel. The AgentScripts tab filters the list; each script has its own enable switch.
 4. Open the matching site and sign in normally. Reload that page after installing or changing an AgentScript so its tools register.
 
+**Internal tools on plain http.** An intranet app served over http from anything but localhost (a LAN server, an IP address) is not a secure context, so \`crypto.randomUUID\`, \`crypto.subtle\` and \`navigator.clipboard\` are undefined in your script there. Tools still register; make ids from \`crypto.getRandomValues\` and copy with \`GM_setClipboard\`.
+
 ## Format Requirements
 1. MUST use the \`// ==AgentScript==\` metadata block (NOT UserScript).
 2. MUST declare each tool via \`// @webmcp <toolName> <permission>\` (permissions: allow, prompt, deny). Undeclared tools are denied by default. **Prefer \`prompt\`**: in a script you wrote as an agent, a self-declared \`allow\` resolves as \`prompt\` before user grants are applied, so declaring \`allow\` does not grant you authority. The gate keys on who wrote the script, not on what the script asks for: a script installed through the Agent Bridge, over MCP or from a shell, cannot grant itself an ungated tool, and \`export_script\` returns a \`WEBMCP_ALLOW_DOWNGRADED\` warning when you try. The user can grant a saved Allow rule or enable Full access in the extension; MCP cannot grant either itself.
-3. Top-level \`navigator.modelContext.registerTool()\` is **strongly recommended** (NOT enforced — IIFE-wrapped scripts also work). The reason: Customaise's in-browser AI editor performs **symbol-level edits** (function-by-function) only on functions that are addressable at the top level or inside a clearly-named IIFE structure with named functions. Flat anonymous code or deeply-nested anonymous arrows force the editor to fall back to **whole-script rewrite**, which is slower, more error-prone, and loses git-friendly diffs. If symbol-editability matters (it usually does for long-lived scripts), structure your code as named top-level functions referenced by your \`registerTool\` calls.
+3. Top-level \`document.modelContext.registerTool()\` is **strongly recommended** (NOT enforced: IIFE-wrapped scripts also work). The reason: Customaise's in-browser AI editor performs **symbol-level edits** (function-by-function) only on functions that are addressable at the top level or inside a clearly-named IIFE structure with named functions. Flat anonymous code or deeply-nested anonymous arrows force the editor to fall back to **whole-script rewrite**, which is slower, more error-prone, and loses git-friendly diffs. If symbol-editability matters (it usually does for long-lived scripts), structure your code as named top-level functions referenced by your \`registerTool\` calls.
 
 \`\`\`javascript
 // ==AgentScript==
@@ -1713,7 +1894,7 @@ The two sides meet over a WebSocket on \`localhost:4050\`, served by the Customa
 // @version      1.0.0
 // @match        https://github.com/*
 // @description  Exposes GitHub issues data to AI agents via WebMCP tools
-// @webmcp       list_open_issues prompt
+// @webmcp       gh_list_open_issues prompt
 // @grant        GM_log
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -1725,11 +1906,11 @@ const usageCount = await GM.getValue('usage_count', 0);
 await GM.setValue('usage_count', usageCount + 1);
 GM_log(\`AgentScript loaded. Usage count: \${usageCount + 1}\`);
 
-navigator.modelContext.registerTool({
-  name: "list_open_issues",
+document.modelContext.registerTool({
+  name: "gh_list_open_issues",
   description: "Returns all open issues with titles and labels",
-  schema: { type: "object", properties: {} },
-  readOnlyHint: true, // Set to true if your tool does not mutate the page (defaults to false)
+  inputSchema: { type: "object", properties: {} },
+  annotations: { readOnlyHint: true }, // true if the tool only reads (defaults to false)
   execute: async (args) => {
     const issues = document.querySelectorAll('.js-issue-row');
     return Array.from(issues).map(row => ({
@@ -1752,9 +1933,10 @@ navigator.modelContext.registerTool({
 - \`deny\` — Blocked. Tool is suppressed and fails if called. All undeclared tools default to deny.
 
 ### Consent gate timing (important when designing tools)
-Every \`navigator.modelContext.callTool(...)\` invocation — yours, the IDE MCP client's, the in-extension AI's, or any other in-page agent — round-trips to the extension service worker for permission evaluation **before** your \`execute\` body runs. Two practical consequences:
+Every call to a tool (\`executeTool\` or \`callTool\` from page code, the Agent Bridge, the in-extension AI, or the browser's own agent) round-trips to the extension service worker for permission evaluation **before** your \`execute\` body runs. Two practical consequences:
 - \`allow\` tools add ~50–100 ms latency per call. Fine for human-paced flows; avoid hot-loop calls.
 - \`prompt\` tools may **block for up to 5 minutes** while waiting on the user. Design tools so this is acceptable (no timing-sensitive logic between trigger and execute).
+- A call through MCP or the CLI that nobody is asked to approve ends **30 seconds** after the agent makes it, while the tool keeps running in the page. Return what the tool has within that time, and let the agent call again for the rest.
 
 The same gate evaluates current permissions across **every call path**. A \`prompt\` declaration asks for approval in the default tool-permissions mode, unless the user has saved an Allow override. It is not an unconditional promise of a prompt: user-enabled Full access in extension 1.3.6 can also allow eligible Prompt tools in that browser.
 
@@ -1764,42 +1946,54 @@ The same gate evaluates current permissions across **every call path**. A \`prom
 
 ## Manual HITL Requests
 Even if your tool is granted the \`allow\` permission, you can dynamically invoke the Customaise consent modal inside an execute block:
-\`const consent = await navigator.modelContext.requestUserInteraction({ toolName: 'my_tool', reason: '...' });\`
+\`const consent = await document.modelContext.requestUserInteraction({ toolName: 'my_tool', reason: '...' });\`
 
 ## GM_* API Support in MAIN World
-- AgentScripts execute in the browser's MAIN world so they can access \`navigator.modelContext\`.
+- AgentScripts execute in the browser's MAIN world so they can access \`document.modelContext\`.
 - **Customaise provides a secure, native MAIN world bridge for GM_* APIs.**
 - AgentScripts are executed contextually by Customaise, so **top-level await is fully supported**.
 - \`GM_setValue\`, \`GM_xmlhttpRequest\`, \`GM_log\`, etc., are fully supported.
 - You MUST explicitly include a \`@grant\` directive for each API you use, exactly like a UserScript.
 - \`unsafeWindow\` should NOT be used (it is redundant because you are already in the MAIN world).
 
-## navigator.modelContext: USE BARE NAME (do not prefix with globalThis/window/self)
+## document.modelContext: USE THE BARE NAME (do not prefix with window/globalThis/self)
 
-Customaise wraps \`navigator.modelContext\` per-script via a function-scoped Proxy injected by the IIFE wrapper. The Proxy enforces:
+Customaise gives each AgentScript its own \`modelContext\` object, injected by the IIFE wrapper. It enforces:
 - User-set **Deny** overrides (silent no-op when the user has denied this script's tool)
 - Tool-conflict attribution (when two scripts register the same tool name on the same tab, the SW conflict ledger gets the right scriptId so the UI badge shows on both)
 - Multi-conflict iteration UX (dup throws are swallowed so all conflicts surface in one pass instead of crashing on the first)
 
-**Always reference \`navigator.modelContext\` with the bare \`navigator\` identifier:**
+Bare \`document.modelContext\` and bare \`navigator.modelContext\` both reach it. The bare \`navigator\` is shadowed by a function-local declaration inside the IIFE wrapper, and when Customaise injects the script it rewrites each bare \`document.modelContext\` read to that same object.
+
+**Always use the bare \`document\` or \`navigator\` identifier:**
 \`\`\`js
-// CORRECT — resolves through the per-script Proxy
-navigator.modelContext.registerTool({ name: 'foo', description: '...', execute: ... });
-const tools = navigator.modelContext.listTools();
+// CORRECT: both reach the script's own object
+document.modelContext.registerTool({ name: 'foo', description: '...', execute: ... });
+const tools = await document.modelContext.getTools();
 \`\`\`
 
-**Never explicitly access via the global object — those bypass the Proxy:**
+**These bypass it:**
 \`\`\`js
-// WRONG — these skip Customaise's Deny enforcement, conflict attribution,
-//         and multi-conflict UX. The user's overrides will silently not apply.
+// WRONG: these skip Customaise's Deny enforcement, conflict attribution
+//        and multi-conflict UX. The user's overrides will silently not apply.
+window.document.modelContext.registerTool({ ... });
 globalThis.navigator.modelContext.registerTool({ ... });
-window.navigator.modelContext.registerTool({ ... });
-self.navigator.modelContext.registerTool({ ... });
+const { modelContext } = document; // destructuring is not rewritten
 \`\`\`
 
-The bare \`navigator\` is shadowed by a function-local declaration inside the IIFE wrapper. Explicit globalThis/window/self lookups skip the lexical scope chain and hit the unwrapped browser navigator instead. This is a deliberate Customaise convention — the W3C \`navigator.modelContext\` spec doesn't require Customaise's deny/attribution semantics, but our scripts depend on them for proper UX.
+Do not declare a variable, parameter or function named \`document\` or \`navigator\` anywhere in an AgentScript. Customaise then leaves every \`document.modelContext\` in it unrewritten, because it cannot tell which binding a read means. This is a deliberate Customaise convention: the WebMCP standard doesn't require Customaise's deny/attribution semantics, but our scripts depend on them for proper UX.
 
-**Spec deviation note**: when a tool name collides with another script's registration on the same tab, the W3C spec says \`registerTool\` should throw \`InvalidStateError\`. Customaise's wrapper SWALLOWS this throw (sends the conflict signal to the SW for badge surfacing, then returns a no-op handle) so user code continues past the duplicate call. This means scripts that explicitly \`try/catch\` \`InvalidStateError\` will not see it; rely on the Tool Conflict badge in the script row UI for resolution instead.
+**Spec deviation note**: when a tool name collides with another script's registration on the same tab, the standard rejects the duplicate. Customaise's wrapper SWALLOWS that error (sends the conflict signal to the SW for badge surfacing, then returns a no-op handle) so user code continues past the duplicate call. This means scripts that explicitly \`try/catch\` \`InvalidStateError\` will not see it; rely on the Tool Conflict badge in the script row UI for resolution instead.
+
+## The standard API (Chrome 150, Customaise 1.4.0)
+
+- **Unregister by signal.** \`document.modelContext.registerTool(tool, { signal })\`: aborting \`signal\` removes the tool. Customaise also keeps \`unregisterTool(name)\`.
+- **Hints go in \`annotations\`**: \`readOnlyHint\` (the tool only reads) and \`consequentialHint\` (it acts for the user, such as buying, sending or deleting). Customaise still reads a top-level \`readOnlyHint\`. For an AgentScript's own tools, your \`@webmcp\` line decides approval.
+- **\`execute(input, { signal })\`.** Customaise passes the signal, and \`caller\` on calls it dispatches.
+- **Return expected failures as values**: \`return { error: 'what went wrong' }\`, which every caller reads as you wrote it. The standard does not forward a thrown error to the agent.
+- **\`registerTool\`'s result can be awaited** like the standard's promise. A validation error is still thrown synchronously, and a duplicate name is swallowed as described above.
+- **In-page consumers** list tools with \`getTools()\` and call one with \`executeTool(tool, input)\`, which resolves to the result as a string. Customaise keeps \`listTools()\` and \`callTool(name, args)\` as extras. A tool registered through Customaise goes through the consent gate whichever of these calls it.
+- **Schema**: the standard calls it \`inputSchema\`; Customaise also accepts \`schema\`.
 
 ## Advanced Networking & Auth Interception
 You can use \`@run-at document-start\` to inject your AgentScript before the target page loads.
@@ -1879,12 +2073,12 @@ Every rejection is an \`Error\` with \`.code\`; \`PROMPT_AI_CONTEXT_OVERFLOW\` c
 
 \`\`\`js
 // @grant CM_promptAI
-// @webmcp classify_sentiment allow
-navigator.modelContext.registerTool({
-  name: 'classify_sentiment',
+// @webmcp ex_classify_sentiment prompt
+document.modelContext.registerTool({
+  name: 'ex_classify_sentiment',
   description: 'Classify text into positive/negative/neutral via on-device Nano.',
-  schema: { type: 'object', required: ['text'], properties: { text: { type: 'string' } } },
-  readOnlyHint: true,
+  inputSchema: { type: 'object', required: ['text'], properties: { text: { type: 'string' } } },
+  annotations: { readOnlyHint: true },
   execute: async ({ text }) => {
     if (await CM_promptAI.availability() !== 'available') {
       return { ok: false, error: 'nano-unavailable' };
@@ -1930,7 +2124,7 @@ CDP reference: <https://chromedevtools.github.io/devtools-protocol/> — look up
 // ==AgentScript==
 // @name         Network Sniffer
 // @match        https://target.example.com/*
-// @webmcp       tgt_capture_network allow
+// @webmcp       tgt_capture_network prompt
 // @grant        CM_devtools
 // @grant        GM_log
 // @devtools-justification Subscribes to Network.requestWillBeSent for a brief window so the agent can see what API endpoints the page hits in response to a UI action. The page uses cross-origin iframes whose requests window.fetch interception cannot see.
@@ -1939,14 +2133,14 @@ CDP reference: <https://chromedevtools.github.io/devtools-protocol/> — look up
 // Prefix tool names with a 2-4 letter site code — WebMCP tool names share
 // a global namespace across all open AgentScripts on the tab, so generic
 // names like 'capture_network' will collide.
-navigator.modelContext.registerTool({
+document.modelContext.registerTool({
   name: 'tgt_capture_network',
   description: 'Hold a CDP session for N ms and return requests the page makes during the window. Chrome shows a yellow "debugging this browser" banner while active.',
-  schema: {
+  inputSchema: {
     type: 'object',
     properties: { durationMs: { type: 'number', description: 'Capture window in ms. 500-10000.' } },
   },
-  readOnlyHint: true,
+  annotations: { readOnlyHint: true },
   execute: async (args) => {
     const ms = Math.min(Math.max(Number(args?.durationMs) || 3000, 500), 10000);
     const captured = [];
@@ -2016,7 +2210,7 @@ Whenever you start work against a page you don't know well, your **first** Agent
 // ==AgentScript==
 // @name        Page Inspector
 // @match       https://target.example.com/*
-// @webmcp      inspect_state allow
+// @webmcp      tgt_inspect_state prompt
 // @grant       GM_log
 // @run-at      document-start
 // ==/AgentScript==
@@ -2034,16 +2228,16 @@ window.fetch = function (input, init) {
   return _origFetch.apply(this, arguments);
 };
 
-navigator.modelContext.registerTool({
-  name: 'inspect_state',
+document.modelContext.registerTool({
+  name: 'tgt_inspect_state',
   description: 'Returns intercepted POST endpoints and headers seen so far.',
-  schema: { type: 'object', properties: {} },
-  readOnlyHint: true,
+  inputSchema: { type: 'object', properties: {} },
+  annotations: { readOnlyHint: true },
   execute: async () => ({ ..._captured, headerKeys: Object.keys(_captured.headers) }),
 });
 \`\`\`
 
-Now you can call \`inspect_state\` from your IDE after performing actions on the page — you'll see exactly what API endpoints exist, what headers carry auth, what payloads look like. **You couldn't do this without WebMCP**: a plain userscript could capture the same data but you'd have to dump it via \`GM_log\` and grep \`get_console_context\` for it. Round-trip too slow to iterate against.
+Now you can call \`tgt_inspect_state\` from your IDE after performing actions on the page — you'll see exactly what API endpoints exist, what headers carry auth, what payloads look like. **You couldn't do this without WebMCP**: a plain userscript could capture the same data but you'd have to dump it via \`GM_log\` and grep \`get_console_context\` for it. Round-trip too slow to iterate against.
 
 ### Recipe 2 — Auth-interception → replay (the "BYO session" trick)
 When the target site has no public API but you want to drive it programmatically, the page's own authenticated requests are your API. Pattern:
@@ -2091,11 +2285,11 @@ This pattern unlocks **any** web app that the user is logged into. No API keys, 
 SPAs change pages without reload. If you read \`document.title\` or any DOM state inside \`registerTool\` (or in module scope at script load), you'll be holding stale data. **Always read live state inside the \`execute\` body.** Wrong:
 \`\`\`javascript
 const currentPrice = parseFloat(document.title.match(/[\\d.]+/)[0]); // captured ONCE at script load
-navigator.modelContext.registerTool({ name: 'foo', execute: async () => ({ currentPrice }) });
+document.modelContext.registerTool({ name: 'foo', execute: async () => ({ currentPrice }) });
 \`\`\`
 Right:
 \`\`\`javascript
-navigator.modelContext.registerTool({
+document.modelContext.registerTool({
   name: 'foo',
   execute: async () => ({ currentPrice: parseFloat(document.title.match(/[\\d.]+/)[0]) }),
 });
@@ -2105,19 +2299,19 @@ navigator.modelContext.registerTool({
 When something doesn't work, **don't rewrite the action tool**. Add fields to your inspection tool's return value. Find the missing piece. Then fix the action. The diagnostic tool grows; the action tool stays focused.
 
 \`\`\`
-1. inspect_state shows: 0 captured POSTs → page hasn't done anything yet → user needs to click something
-2. inspect_state shows: 12 captured POSTs but no /api/order/place → wrong action triggered, look at page UI
-3. inspect_state shows: the right endpoint, but body has fields you didn't expect → copy the format
+1. tgt_inspect_state shows: 0 captured POSTs → page hasn't done anything yet → user needs to click something
+2. tgt_inspect_state shows: 12 captured POSTs but no /api/order/place → wrong action triggered, look at page UI
+3. tgt_inspect_state shows: the right endpoint, but body has fields you didn't expect → copy the format
 4. action tool now succeeds
 \`\`\`
 
-Each iteration takes seconds because the inspect_state response is structured JSON delivered to you, not a string in a console somewhere.
+Each iteration takes seconds because the tgt_inspect_state response is structured JSON delivered to you, not a string in a console somewhere.
 
-### Recipe 5 — \`prompt\` for anything with side effects, \`allow\` for reads
-Default to \`allow\` for tools that just observe. Use \`prompt\` for anything that mutates state (orders, posts, deletes, transfers). The user's consent is your safety harness — don't bypass it just because \`allow\` is more convenient. The 5-minute consent budget is generous; design tools assuming the user might take 30 seconds to read what you're about to do.
+### Recipe 5: \`prompt\` for anything with side effects
+Use \`prompt\` for anything that mutates state (orders, posts, deletes, transfers). The user's consent is your safety harness: don't bypass it just because \`allow\` is more convenient. A tool that only reads is one the person can safely set to Always allow; in a script you write as an agent, declare it \`prompt\` too, since your own \`allow\` resolves as \`prompt\` and warns (rule 2). The 5-minute consent budget is generous; design tools assuming the user might take 30 seconds to read what you're about to do.
 
 ### Recipe 6 — Throw away your diagnostic tools when shipping
-Once your action tool works, \`delete_script\` the inspector. Or move its tools to \`@webmcp inspect_state deny\` so they're not callable. Diagnostics in production = attack surface.
+Once your action tool works, \`delete_script\` the inspector. Or move its tools to \`@webmcp tgt_inspect_state deny\` so they're not callable. Diagnostics in production = attack surface.
 
 ## Troubleshooting — \`list_webmcp_tools\` returns empty after reload
 Walk these in order. Most common cause first:
@@ -2126,6 +2320,6 @@ Walk these in order. Most common cause first:
 3. **The intended script is disabled.** Its own switch in Customaise's Scripts panel must be on. \`list_scripts\` shows the \`enabled\` boolean; the AgentScripts tab only filters the list.
 4. **Tab wasn't reloaded after export.** Manifest content scripts re-inject only on navigation. Call \`reload_tab\` explicitly.
 5. **Script body threw before \`registerTool\` ran.** Use \`get_console_context\` on the tab to look for early errors. Nothing after the throw runs, so your tools never registered.
-6. **\`@webmcp\` declarations are malformed and were silently stripped at parse time.** Re-read the \`webmcp[]\` field in the \`export_script\` response — if it's empty but you intended grants, fix the directive syntax (\`<toolName> <allow|prompt|deny>\`, single space, no extra tokens).
+6. **\`@webmcp\` declarations are malformed and were silently stripped at parse time.** Re-read the \`webmcp[]\` field in the \`export_script\` response — if it's empty but you intended grants, fix the directive syntax (\`<toolName> <allow|prompt|deny>\`, nothing else on the line).
 7. **You called \`registerTool\` for a tool that isn't declared in any \`@webmcp\` line.** It registers in the page registry but is filtered from \`list_webmcp_tools\` and rejected at call time. Add the \`@webmcp\` line.
 `;

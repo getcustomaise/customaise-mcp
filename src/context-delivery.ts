@@ -342,6 +342,87 @@ export function pruneToBudget<T>(value: T, budgetBytes: number): PruneResult<T> 
 /** `KB` string for a byte count, matching the existing `fileSizeKB` fields. */
 export const asKB = (bytes: number): string => `${(bytes / 1024).toFixed(1)} KB`;
 
+/** Bytes of serialized JSON, the measure the inline budget is set in. */
+export const payloadBytes = (value: unknown): number => sizeOf(value);
+
+// ── A page tool's result ─────────────────────────────────────────────────
+//
+// `call_webmcp_tool` returns whatever the page's tool returned, and a tool
+// that reads a list or a long page can return several megabytes. A client
+// refuses a result past its own limit, so the caller got an error instead of
+// data the tool had already gathered, and could not even read the id it would
+// need to continue. Under the inline budget nothing changes: the result comes
+// back exactly as the tool returned it. Over it, the same contract as the
+// context tools applies, with one difference that shapes every message below:
+// asking again runs the page tool again, so the reply must never depend on a
+// second call to recover what the first one returned.
+
+/** Results `.customaise/tool-results/` keeps; older ones are removed as new ones arrive. */
+export const TOOL_RESULTS_KEPT = 20;
+
+/** The time first, so names sort in the order the results arrived; then the tool. */
+export function toolResultFileName(toolName: string, now: Date, suffix: string): string {
+  const stamp = now.toISOString().replace(/[-:.]/g, '');
+  const tool = String(toolName).replace(/[^A-Za-z0-9_-]+/g, '_').slice(0, 64) || 'tool';
+  return `${stamp}-${suffix}-${tool}.json`;
+}
+
+/** The saved results to remove, oldest first. Only names this module wrote. */
+export function staleToolResults(names: readonly string[], keep: number = TOOL_RESULTS_KEPT): string[] {
+  return names.filter((name) => /^\d{8}T\d{9}Z-[0-9a-f]{8}-[A-Za-z0-9_-]+\.json$/.test(name)).sort().reverse().slice(keep);
+}
+
+const SUMMARY_VALUE_BYTES = 1000;
+const SUMMARY_BYTES = 8 * 1024;
+const SUMMARY_KEYS = 50;
+
+/**
+ * What a file-mode reply says about the result it saved. Small values come as
+ * they are, so an id, a count or a next step can be acted on without opening
+ * the file; anything larger is described by its size.
+ */
+export function toolResultSummary(value: unknown): unknown {
+  let used = 0;
+  const describe = (v: unknown): unknown => {
+    const bytes = sizeOf(v);
+    if (bytes <= SUMMARY_VALUE_BYTES && used + bytes <= SUMMARY_BYTES) { used += bytes; return v; }
+    if (Array.isArray(v)) return `(a list of ${v.length} items, in the file)`;
+    if (typeof v === 'string') return `(text of ${v.length} characters, in the file)`;
+    if (v && typeof v === 'object') return `(an object of ${Object.keys(v).length} keys, in the file)`;
+    return `(${bytes} bytes, in the file)`;
+  };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return describe(value);
+  const entries = Object.entries(value as Record<string, unknown>);
+  const summary: Record<string, unknown> = Object.fromEntries(entries.slice(0, SUMMARY_KEYS).map(([key, v]) => [key, describe(v)]));
+  if (entries.length > SUMMARY_KEYS) summary['(more keys)'] = `${entries.length - SUMMARY_KEYS} more keys, in the file`;
+  return summary;
+}
+
+/** `output` for `call_webmcp_tool`, which only ever writes a result too large to return. */
+export const TOOL_RESULT_OUTPUT_DESCRIPTION =
+  'Where a result over the inline budget (64 KB by default) goes; a smaller result always comes back in this response as the tool returned it. ' +
+  '"file" (default) writes it whole to .customaise/tool-results/ in your workspace and returns its path, its small values and the size of the rest. ' +
+  '"inline" writes nothing and returns it in this response, with long lists shortened to fit. Use it when you have no filesystem tool to read the file with, such as a chat client. ' +
+  '"auto" follows the CUSTOMAISE_MCP_OUTPUT environment variable, falling back to "file".';
+
+export const TOOL_RESULT_FILE_HINT =
+  'The whole result is in the file above, as JSON; summary shows its small values and the size of the rest. Read the parts you need with your file tools. ' +
+  'If you have NO way to read local files, ask the tool for a smaller page if it offers one, or call call_webmcp_tool again with output: "inline" ' +
+  'to get the result in the response with long lists shortened. Either runs the page tool again, so call it again only for a tool that only reads.';
+
+/** The note on an inline result that was over the budget. */
+export function toolResultInlineHint(omissions: Omission[]): string {
+  if (omissions.length === 0) {
+    return 'Returned in full: the result is over the inline budget but has no list to shorten, so nothing was dropped.';
+  }
+  const worst = omissions.slice(0, 3).map((o) => `${o.path || '(the result)'} (${o.kept} of ${o.kept + o.omitted})`).join(', ');
+  return (
+    `Returned inline and SHORTENED to fit the inline budget: ${worst}. ` +
+    'Every key and nesting level is intact; only list items were dropped, so an offset or next page in this result can point past items it does not hold. ' +
+    'Ask the tool for fewer items per call, or raise CUSTOMAISE_MCP_INLINE_MAX_KB.'
+  );
+}
+
 /**
  * The retry instruction on every file-mode response.
  *

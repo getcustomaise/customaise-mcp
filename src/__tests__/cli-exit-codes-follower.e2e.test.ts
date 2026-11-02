@@ -199,6 +199,24 @@ describe('exit codes survive the follower relay', () => {
     assert.equal(code, 5, stdout);
   });
 
+  it('a Script Decisions refusal keeps its type and code through the relay', async () => {
+    nextAck = { success: false, error: 'This script is shared with the person, so only they can choose its provider.',
+      error_data: { type: 'person_required', code: 'shared_script' } };
+    const { code, stdout } = await runCli(['decisions', 'set', 's1', 'jev']);
+    assert.equal(code, 6, stdout);
+    assert.equal(JSON.parse(stdout).error.code, 'shared_script');
+  });
+
+  it('names the version an extension before 1.4.0 lacks, even through the relay', async () => {
+    // The old extension's answer is untyped prose, so the relay carries it as
+    // a plain message; the follower's own handler must still recognise it.
+    nextAck = { success: false, error: 'Unknown MCP request type: get_script_decisions' };
+    const { code, stdout } = await runCli(['decisions']);
+    assert.equal(code, 3, stdout);
+    assert.equal(JSON.parse(stdout).error.type, 'extension_outdated');
+    assert.equal(JSON.parse(stdout).error.minExtensionVersion, '1.4.0');
+  });
+
   it('leaves an untyped failure as a generic one', async () => {
     // The fallback must stay put: no data, no code, nothing to branch on.
     nextAck = { success: false, error: 'something broke' };

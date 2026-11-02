@@ -75,6 +75,7 @@ describe('a follower learns the session however late it attaches', () => {
     // status frame is the connect-time one.
     const ext = await attachExtension(port, {
       tier: 'power_user', unlimited: true, remote_approvals: true, authenticated: true,
+      agent_permissions: { mode: 'full_access', revision: 'grant-1', scope: 'browser_profile', locked: false, scriptDecisions: true },
     });
     open.push({ close: () => ext.close() });
     await until(() => leader.getSessionSnapshot().tier === 'power_user');
@@ -89,6 +90,8 @@ describe('a follower learns the session however late it attaches', () => {
     assert.equal(snap.authenticated, true);
     assert.equal(snap.remoteApprovals, true);
     assert.equal(snap.capMode, 'unlimited');
+    // Whether agents may manage Script Decisions reaches a follower's doctor too.
+    assert.equal(snap.agentPermissions?.scriptDecisions, true);
   });
 
   it('relays the leader version, which is the only skew signal the seam has', async () => {

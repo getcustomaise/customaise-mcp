@@ -19,13 +19,13 @@ This bundle connects Claude Desktop to the extension so it can do both: call the
 - **Write or edit scripts**: import an existing UserScript or AgentScript, edit it in Claude's chat, push the result back through Customaise's validation pipeline
 - **Operate tabs**: list, focus, reload, open, close, take screenshots
 
-Same 19 tools the Customaise MCP exposes to Cursor, Claude Code, Codex, Antigravity, and Kiro.
+Same 21 tools the Customaise MCP exposes to Cursor, Claude Code, Codex, Antigravity, and Kiro.
 
 Everything runs in the browser session where you're already signed in. No API keys, no service accounts, no separate OAuth for the sites you use.
 
 ## Before you install
 
-1. Install the [Customaise Chrome extension](https://customaise.com/install) from the Chrome Web Store on Chrome 147 or later, the tested release baseline for extension 1.3.9.
+1. Install the [Customaise Chrome extension](https://customaise.com/install) from the Chrome Web Store on Chrome 147 or later, the tested release baseline for extension 1.4.0.
 2. Sign in to Customaise. The extension is the full product; a Power User plan unlocks unlimited use of this MCP bridge.
 3. Open Customaise → Settings → MCP & Terminal and enable Agent Bridge.
 
@@ -35,11 +35,9 @@ Everything runs in the browser session where you're already signed in. No API ke
 - Or drag the file into **Settings → Extensions** in Claude Desktop.
 - Or use **Settings → Extensions → Advanced settings → Install Extension** and pick the file.
 
-## Updating to 3.2.4
+## Updating
 
-Install this 3.2.4 bundle alongside extension 1.3.5 for the complete permission and subscription-verification fixes. Restart your MCP clients, including any running Customaise CLI daemon. A temporary verification failure now remains unknown instead of becoming a Free subscription; affected calls explain that verification can be retried. Confirmed subscription changes still apply normally.
-
-The 19 tools and relay protocol 2 are unchanged from 3.2.3. Older compatible extensions can still connect; save progress, cancellation and recovery require extension 1.3.4 or newer.
+Restart your MCP clients, including any running Customaise CLI daemon, after installing a new bundle. A temporary account-verification failure stays unknown rather than counting as a Free subscription; affected calls explain that verification can be retried. Confirmed subscription changes still apply normally.
 
 ## How it talks to your browser
 
@@ -62,12 +60,13 @@ Claude Desktop spawns this bundle as a local Node.js process. The bundle opens a
 
 ## Script Decisions reference
 
-This 3.2.8 bundle includes `customaise://script-decisions`, alongside the UserScript and AgentScript handbooks. It explains the questions written in the code, the CM_decisions API, a working example and bounded recovery. Pair with extension 1.3.9 (Script Decisions was introduced in 1.3.8). Script Decisions is a Power User capability. Saved keys, device authorisation and per-script provider selection belong to the user's account and extension controls, not MCP tools. Provider charges and WebMCP approval are separate.
+This 3.2.9 bundle includes `customaise://script-decisions`, alongside the UserScript and AgentScript handbooks. It explains the questions written in the code, the CM_decisions API, a working example and bounded recovery. Pair with extension 1.4.0 (Script Decisions was introduced in 1.3.8). Script Decisions is a Power User capability. Saved keys and device authorisation belong to the person's account and extension controls. When the person turns on Script Decisions under Full access in Agent permissions, Claude can choose a script's provider with `set_script_decisions`; otherwise the person chooses it in the script's Decisions menu. Provider charges and WebMCP approval are separate.
 
-## UserScript reference for extension 1.3.9
+## UserScript reference for extension 1.4.0
 
 Read `customaise://userscript-conventions` before writing or changing a UserScript.
 It covers backup migration, source preservation, callback/Promise forms, network
 and browser requirements, script options and reload/reuse checks. The same guide
-ships in MCP, CLI and this bundle. See the [migration reference](https://customaise.com/learn/userscripts#moving-scripts)
-for setup and known limits; selected checks do not guarantee every imported script.
+ships in MCP, CLI and this bundle. The [migration reference](https://customaise.com/learn/userscripts#moving-scripts)
+covers moving a library from Tampermonkey. Customaise provides every GM API and
+metadata key Tampermonkey supports on Chrome.

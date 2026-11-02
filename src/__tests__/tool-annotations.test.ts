@@ -98,7 +98,7 @@ describe('tool annotations', () => {
   it('finds every registered tool', () => {
     // A parser that silently matched nothing would make every assertion
     // below vacuously pass, which is the failure mode of a static test.
-    assert.ok(TOOLS.length >= 19, `parsed only ${TOOLS.length} tools`);
+    assert.ok(TOOLS.length >= 21, `parsed only ${TOOLS.length} tools`);
     assert.ok(TOOLS.some((t) => t.name === 'get_page_context'));
   });
 

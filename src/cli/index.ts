@@ -22,6 +22,7 @@
 
 import { resolve as resolvePath } from 'node:path';
 import { EXIT, exitCodeForErrorType } from './exit-codes.js';
+import { writeOut, writeErr } from './output.js';
 import { isRejection, rejectionMessage } from './rejection.js';
 import { buildPrimer, PRIMER_BEGIN, PRIMER_END } from './primer.js';
 import { installCrashGuard, connectToDaemon } from './connect.js';
@@ -31,11 +32,11 @@ import { readState, writeState, resolveTab } from './state.js';
 let pretty = false;
 
 function emit(payload: unknown): void {
-  process.stdout.write(JSON.stringify(payload, null, pretty ? 2 : 0) + '\n');
+  writeOut(JSON.stringify(payload, null, pretty ? 2 : 0) + '\n');
 }
 
 function fail(code: number, message: string): never {
-  process.stderr.write('customaise: ' + message + '\n');
+  writeErr('customaise: ' + message + '\n');
   emit({ ok: false, error: { message } });
   process.exit(code);
 }
@@ -53,6 +54,9 @@ const USAGE = `customaise ${PKG_VERSION}: drive the Customaise extension from a 
   customaise scripts fork <id> -o FILE    fork a shared script into an editable copy
   customaise scripts rm <id>              delete a script
   customaise sync <dir>                   bulk-export your scripts to a directory
+  customaise decisions [id]               Script Decisions: agent access, keys, script states
+  customaise decisions set <id> <jev|openai-decisions|off> [--sets HASH,HASH]
+                                          choose a script's provider; off is always allowed
   customaise tabs                         open browser tabs
   customaise tab open <url> | focus <id>   close and reload take an optional id
   customaise tab list | shot -o FILE | use --tab N
@@ -77,8 +81,9 @@ Typical loop:
   -h, --help   this text
 
 JSON on stdout, diagnostics on stderr. Exit: 0 ok, 2 usage, 3 unavailable,
-4 sign-in expired, 5 cap reached, 6 consent denied, 7 consent timed out,
-8 rejected by Customaise (see diagnostics).`;
+4 sign-in expired, 5 cap reached, 6 consent denied or only the person can
+make that change, 7 consent timed out, 8 rejected by Customaise (see
+diagnostics).`;
 
 /**
  * The command tree as data, for `customaise schema`.
@@ -102,6 +107,8 @@ const COMMANDS: ReadonlyArray<{ command: string; description: string; tool?: str
   { command: 'scripts fork <id>', description: 'fork a shared script into an editable copy', tool: 'import_script', flags: ['-o FILE'] },
   { command: 'scripts rm <id>', description: 'delete a script', tool: 'delete_script' },
   { command: 'sync <dir>', description: 'bulk-export your scripts to a directory', tool: 'sync_scripts' },
+  { command: 'decisions [id]', description: 'Script Decisions on this device: agent access, saved keys, each script provider and state; with an id, its question lists and hashes', tool: 'get_script_decisions' },
+  { command: 'decisions set <id> <jev|openai-decisions|off>', description: 'choose a script provider and the question lists to switch on; needs Script Decisions turned on for agents by the person, except off', tool: 'set_script_decisions', flags: ['--sets HASH,HASH'] },
   { command: 'tabs', description: 'open browser tabs', tool: 'list_tabs' },
   { command: 'tab list', description: 'open browser tabs (same as tabs)', tool: 'list_tabs' },
   { command: 'tab open <url>', description: 'open a tab', tool: 'open_tab' },
@@ -133,7 +140,7 @@ interface Flags { [k: string]: string | boolean }
  * there and exited 0 reporting success. Rejecting here rather than at each
  * call site keeps the next value-taking flag from reintroducing it.
  */
-const VALUE_FLAGS = new Set(['tab', 'out', 'args', 'id', 'script', 'operation']);
+const VALUE_FLAGS = new Set(['tab', 'out', 'args', 'id', 'script', 'operation', 'sets']);
 
 function parseFlags(argv: string[]): { positional: string[]; flags: Flags } {
   const positional: string[] = [];
@@ -197,7 +204,7 @@ function present(result: any, passthrough = false): never {
   if (result?.isError) {
     const err = structured?.error ?? {};
     const message = err.message ?? result?.content?.[0]?.text ?? 'Tool call failed.';
-    process.stderr.write('customaise: ' + message + '\n');
+    writeErr('customaise: ' + message + '\n');
     emit({ ok: false, error: { ...err, message } });
     process.exit(exitCodeForErrorType(err.type));
   }
@@ -220,7 +227,7 @@ function present(result: any, passthrough = false): never {
   // run and no tool will ever register. Said on stderr, because stdout is the
   // machine-readable half and must stay parseable.
   if (data && typeof data === 'object' && (data as Record<string, unknown>).userScriptsDisabled === true) {
-    process.stderr.write(
+    writeErr(
       'customaise: "Allow user scripts" is OFF for Customaise in chrome://extensions, '
       + 'so scripts cannot run. Open Customaise Details, enable Allow user scripts, '
       + 'then reload the target tab.\n');
@@ -228,13 +235,30 @@ function present(result: any, passthrough = false): never {
 
   if (!passthrough && isRejection(data)) {
     const message = rejectionMessage(data);
-    process.stderr.write('customaise: ' + message + '\n');
+    writeErr('customaise: ' + message + '\n');
     emit({ ok: false, error: { type: 'rejected', message }, data });
     process.exit(EXIT.REJECTED);
   }
 
   emit({ ok: true, data });
   process.exit(EXIT.OK);
+}
+
+/**
+ * This shell's CUSTOMAISE_MCP_OUTPUT, as an explicit `output` argument, for
+ * every verb whose tool takes one (`call`, `context page`, `context console`).
+ *
+ * The tool's own `auto` resolution reads the env of the process it runs in,
+ * and on this door that is the DAEMON — a long-lived process that inherited
+ * its environment from whichever invocation happened to spawn it, minutes or
+ * hours ago. So `CUSTOMAISE_MCP_OUTPUT=inline customaise context page` did
+ * nothing against a warm daemon, and worked against a cold one, which is a
+ * coin-flip dressed as a setting. Measured both ways before this. Reading it
+ * here makes the documented per-install setting behave the same on both doors.
+ */
+function outputFromEnv(): { output?: 'file' | 'inline' } {
+  const v = String(process.env.CUSTOMAISE_MCP_OUTPUT ?? '').trim().toLowerCase();
+  return v === 'file' || v === 'inline' ? { output: v } : {};
 }
 
 /** `use` is local state; it needs no daemon and no extension. */
@@ -255,8 +279,8 @@ async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const { positional, flags } = parseFlags(argv);
 
-  if (flags.version || positional[0] === 'version') { process.stdout.write(PKG_VERSION + '\n'); process.exit(EXIT.OK); }
-  if (flags.help || positional.length === 0) { process.stderr.write(USAGE + '\n'); process.exit(positional.length ? EXIT.OK : EXIT.USAGE); }
+  if (flags.version || positional[0] === 'version') { writeOut(PKG_VERSION + '\n'); process.exit(EXIT.OK); }
+  if (flags.help || positional.length === 0) { writeErr(USAGE + '\n'); process.exit(positional.length ? EXIT.OK : EXIT.USAGE); }
 
   installCrashGuard(fail);
 
@@ -309,6 +333,25 @@ async function main(): Promise<void> {
     }
     if (flags.operation && !flags.script) fail(EXIT.USAGE, '--operation requires --script');
   }
+  // Checked before any connect, like doctor's flags, so a malformed call
+  // exits 2 without reaching the extension. `--sets ''` is an empty list:
+  // keep the provider with every question list Off, as MCP's `sets: []` does.
+  let decisionsSets: string[] | undefined;
+  if (verb === 'decisions' && sub === 'set') {
+    const provider = positional[3];
+    if (!third || !provider) fail(EXIT.USAGE, 'customaise decisions set <id> <jev|openai-decisions|off> [--sets HASH,HASH]');
+    if (!['jev', 'openai-decisions', 'off'].includes(provider)) {
+      fail(EXIT.USAGE, 'provider must be jev, openai-decisions or off, got "' + provider + '"');
+    }
+    if (flags.sets !== undefined) {
+      if (provider === 'off') fail(EXIT.USAGE, '--sets only goes with jev or openai-decisions; off switches the script provider off');
+      decisionsSets = String(flags.sets).split(',').map((hash) => hash.trim()).filter(Boolean);
+      const bad = decisionsSets.find((hash) => !/^[a-f0-9]{64}$/.test(hash));
+      if (bad !== undefined) {
+        fail(EXIT.USAGE, '--sets takes question list hashes from `customaise decisions <id>` (64 lowercase hex characters), got "' + bad + '"');
+      }
+    }
+  }
 
   // Local, like `init`: the tree does not change with the browser's state.
   if (verb === 'schema') {
@@ -325,7 +368,7 @@ async function main(): Promise<void> {
           [EXIT.UNAVAILABLE]: 'daemon or extension not reachable; do not retry blindly',
           [EXIT.AUTH]: 'signed out; retrying will not help',
           [EXIT.CAP]: 'free-tier cap reached; stop and surface the upgrade path',
-          [EXIT.DENIED]: 'the user denied consent; do not retry',
+          [EXIT.DENIED]: 'the person denied consent, or only the person can make this change; do not retry',
           [EXIT.TIMEOUT]: 'consent expired unanswered; may retry once, with the user told why',
           [EXIT.REJECTED]: 'Customaise refused the input; the diagnostics say what to change',
         },
@@ -391,7 +434,7 @@ async function main(): Promise<void> {
       // The save has a 90-second absolute deadline; leave room for its final
       // status to arrive instead of abandoning it at the SDK's 60s default.
       timeout: 95_000,
-      onprogress: progress => { if (progress.message) process.stderr.write('customaise: ' + progress.message + '\n'); },
+      onprogress: progress => { if (progress.message) writeErr('customaise: ' + progress.message + '\n'); },
     } : undefined);
 
   /**
@@ -413,7 +456,7 @@ async function main(): Promise<void> {
   const CONSENT_BUDGET_MS = 330_000;
   const callToolWithConsentBudget = async (name: string, args: Record<string, unknown>) => {
     const note = setTimeout(() => {
-      process.stderr.write(
+      writeErr(
         'customaise: still waiting. If this tool needs consent, an approval card is open on the page in the browser; with Remote Approvals on, it can also be answered from the account page or a phone (up to 5 minutes).\n',
       );
     }, 10_000);
@@ -441,7 +484,7 @@ async function main(): Promise<void> {
       const persisted = consent.persisted === 'allow'
         ? ' "Always allow" was chosen: this tool will not prompt again on this browser.'
         : '';
-      process.stderr.write('customaise: a person approved this call ' + where + '.' + persisted + '\n');
+      writeErr('customaise: a person approved this call ' + where + '.' + persisted + '\n');
     }
     return r;
   };
@@ -516,7 +559,7 @@ async function main(): Promise<void> {
     case 'tools':   return present(await callTool('list_webmcp_tools', { tabId: tabOf(flags) }));
     case 'call': {
       if (!sub) fail(EXIT.USAGE, 'customaise call <tool> [--args JSON] [--tab N]');
-      return present(noteConsent(await callToolWithConsentBudget('call_webmcp_tool', { toolName: sub, toolArgs: parseArgs(flags), tabId: tabOf(flags) })), true);
+      return present(noteConsent(await callToolWithConsentBudget('call_webmcp_tool', { toolName: sub, toolArgs: parseArgs(flags), tabId: tabOf(flags), ...outputFromEnv() })), true);
     }
     /*
      * Resources, not tools. The server publishes four, and two of them are the
@@ -621,23 +664,18 @@ async function main(): Promise<void> {
       if (!sub) fail(EXIT.USAGE, 'customaise sync <dir>');
       return present(await callTool('sync_scripts', { directory: abs(sub) }));
     }
+    case 'decisions': {
+      // Arguments were checked before the connect above. A refusal only the
+      // person can lift exits 6 (person_required); the message names the step.
+      if (sub === 'set') {
+        return present(await callTool('set_script_decisions', {
+          scriptId: third, provider: positional[3], ...(decisionsSets === undefined ? {} : { sets: decisionsSets }),
+        }));
+      }
+      return present(await callTool('get_script_decisions', { ...(sub === undefined ? {} : { scriptId: sub }) }));
+    }
     case 'context': {
-      // Forward this shell's CUSTOMAISE_MCP_OUTPUT as an explicit argument.
-      //
-      // The tool's own `auto` resolution reads the env of the process it
-      // runs in, and on this door that is the DAEMON — a long-lived
-      // process that inherited its environment from whichever invocation
-      // happened to spawn it, minutes or hours ago. So
-      // `CUSTOMAISE_MCP_OUTPUT=inline customaise context page` did nothing
-      // against a warm daemon, and worked against a cold one, which is a
-      // coin-flip dressed as a setting. Measured both ways before this.
-      // Reading it here makes the documented per-install setting behave
-      // the same on both doors.
-      const envOutput = ((): 'file' | 'inline' | undefined => {
-        const v = String(process.env.CUSTOMAISE_MCP_OUTPUT ?? '').trim().toLowerCase();
-        return v === 'file' || v === 'inline' ? v : undefined;
-      })();
-      const output = envOutput ? { output: envOutput } : {};
+      const output = outputFromEnv();
       if (sub === 'page') return present(await callTool('get_page_context', { tabId: tabOf(flags), ...output }));
       if (sub === 'console') return present(await callTool('get_console_context', { tabId: tabOf(flags), ...output }));
       if (sub === 'selection') {

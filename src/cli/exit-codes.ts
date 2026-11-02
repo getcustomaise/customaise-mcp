@@ -22,7 +22,11 @@ export const EXIT = {
   AUTH: 4,
   /** Free-tier cap reached. Stop. Surface the upgrade path. */
   CAP: 5,
-  /** The user denied consent. A decision, not a fault. Do not retry. */
+  /**
+   * A person's decision, not a fault: the person denied consent, or only
+   * they can make this change (Script Decisions `person_required`). Do not
+   * retry; tell the person what the message asks of them.
+   */
   DENIED: 6,
   /** Consent expired unanswered. May retry once, with the user told why. */
   TIMEOUT: 7,
@@ -60,6 +64,10 @@ export function exitCodeForErrorType(type: string | undefined): number {
     case 'permission_resolution_failed':
     case 'tool_registration_timeout':
     case 'tool_document_changed':
+    // Script Decisions could not confirm the outcome (`connection_uncertain`,
+    // or a code this build does not name). Something upstream is uncertain,
+    // so the next step is reading the state again, not repeating the change.
+    case 'service_unavailable':
     case 'dispatch_timeout':       return EXIT.UNAVAILABLE;
     // Emitted by the CLI itself for a payload-level `success: false`, so the
     // map has to know it: we publish this string in our own JSON, and a
@@ -69,6 +77,11 @@ export function exitCodeForErrorType(type: string | undefined): number {
     case 'not_found':              return EXIT.REJECTED;
     case 'rejected':               return EXIT.REJECTED;
     case 'consent_denied':         return EXIT.DENIED;
+    // Only the person can make this change: turning on Script Decisions for
+    // agents, a runaway-loop pause, keys, this device's access, a shared
+    // script. Same posture as a denial: no retry succeeds until the person
+    // acts, and the message names what they do.
+    case 'person_required':        return EXIT.DENIED;
     case 'consent_timeout':        return EXIT.TIMEOUT;
     // Neither a decision nor a timeout: the request was withdrawn, either by
     // this caller aborting or by the gate tearing down pending consents.

@@ -51,6 +51,12 @@ describe('usage errors exit 2 and say what is wrong', () => {
     ['a non-numeric tab id', ['tab', 'focus', 'abc'], /tab id must be a number/],
     ['a negative remembered tab id', ['use', '--tab', '-1'], /non-negative integer/],
     ['a fractional remembered tab id', ['use', '--tab', '1.5'], /non-negative integer/],
+    ['decisions set with no script', ['decisions', 'set'], /decisions set <id> <jev\|openai-decisions\|off>/],
+    ['decisions set with no provider', ['decisions', 'set', 's1'], /decisions set <id> <jev\|openai-decisions\|off>/],
+    ['decisions set with an unknown provider', ['decisions', 'set', 's1', 'gpt'], /provider must be jev, openai-decisions or off, got "gpt"/],
+    ['--sets given bare', ['decisions', 'set', 's1', 'jev', '--sets'], /--sets expects a value/],
+    ['--sets with off', ['decisions', 'set', 's1', 'off', '--sets', 'a'.repeat(64)], /--sets only goes with jev or openai-decisions/],
+    ['--sets with a value that is not a hash', ['decisions', 'set', 's1', 'jev', '--sets', `${'a'.repeat(64)},nothex`], /64 lowercase hex characters\), got "nothex"/],
   ];
 
   for (const [name, args, expected] of cases) {

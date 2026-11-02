@@ -36,6 +36,15 @@ describe('exitCodeForErrorType', () => {
     assert.equal(exitCodeForErrorType('consent_cancelled'), EXIT.ERROR);
   });
 
+  it('maps the Script Decisions refusals the extension types', () => {
+    // Only the person can lift a person_required refusal (agent access off,
+    // a runaway-loop pause, keys, device access). A retry cannot succeed, so
+    // it shares the denial's code rather than the generic failure's.
+    assert.equal(exitCodeForErrorType('person_required'), EXIT.DENIED);
+    // The outcome could not be confirmed: read the state again, do not repeat.
+    assert.equal(exitCodeForErrorType('service_unavailable'), EXIT.UNAVAILABLE);
+  });
+
   it('keeps a denial and a timeout distinct', () => {
     // Collapsing these would have an agent retry a decision the user made.
     assert.notEqual(exitCodeForErrorType('consent_denied'), exitCodeForErrorType('consent_timeout'));

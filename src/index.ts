@@ -46,7 +46,8 @@ Environment:
   CUSTOMAISE_WS_PORT    WebSocket port to the extension (default 4050).
                         The staging extension build dials 4150, so run
                         CUSTOMAISE_WS_PORT=4150 to drive that one instead.
-  CUSTOMAISE_HTTP_PORT  loopback MCP port in daemon mode (default 4051)`;
+  CUSTOMAISE_HTTP_PORT  loopback MCP port in daemon mode (default 4051, or
+                        the port after CUSTOMAISE_WS_PORT: 4151 for staging)`;
 
 /**
  * Argument handling comes first and exits without touching the bridge.

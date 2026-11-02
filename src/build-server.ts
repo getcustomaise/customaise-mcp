@@ -72,7 +72,7 @@ Customaise supports two distinct paradigms. Your structural formatting depends e
 1. **UserScripts** (Traditional DOM manipulation): Read \`customaise://userscript-conventions\`
 2. **AgentScripts** (WebMCP tool injection): Read \`customaise://agentscript-conventions\`
 
-For typed decisions inside either script type, also read \`customaise://script-decisions\`. It explains \`@grant CM_decisions\`, \`CM_decisions.create\` with questions written out in the code, user-controlled device/provider setup, billing, and bounded failure handling. This capability requires Power User; MCP cannot grant its permissions.
+For typed decisions inside either script type, also read \`customaise://script-decisions\`. It explains \`@grant CM_decisions\`, \`CM_decisions.create\` with questions written out in the code, device/provider setup, billing, and bounded failure handling. This capability requires Power User. When the person has turned on Script Decisions under Full access in Agent permissions, \`set_script_decisions\` chooses a script's provider and switches its question lists; read the state first with \`get_script_decisions\`. No tool can turn that on, and keys, device access, daily limits, the device pause, runaway-loop pauses and shared scripts stay with the person.
 
 # General Workflow
 1. **Understand:** Use \`get_page_context\` to inspect the target page's DOM, visible elements, and \`dom_*\` IDs.

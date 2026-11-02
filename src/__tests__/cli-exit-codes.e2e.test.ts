@@ -19,7 +19,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { WebSocket } from 'ws';
-import { mkdtempSync, rmSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -78,6 +78,8 @@ let extension: WebSocket;
 let nextAck: Ack = { success: true, result: [] };
 /** Every tool the extension was actually asked to run. One entry, one cap unit. */
 const dispatched: string[] = [];
+/** The arguments each of those dispatches carried, in the same order. */
+const dispatchedArgs: Array<Record<string, unknown>> = [];
 /** Every hello frame the daemon sent: its client list, as the sidebar sees it. */
 const hellos: Array<{ clients?: Array<{ name: string; version: string; role: string }> }> = [];
 /** The master-gate state the fake extension reports, as the real one does. */
@@ -99,12 +101,15 @@ const env = () => ({
   CUSTOMAISE_WS_PORT: String(wsPort),
   CUSTOMAISE_CONFIG_DIR: configDir,
   CUSTOMAISE_MCP_ALLOW_INSECURE: '1',
+  // A result under this comes back whole; the large-result tests below are
+  // sized around it, so a whole one is still several times a pipe buffer.
+  CUSTOMAISE_MCP_INLINE_MAX_KB: '512',
 });
 
 /** Run the real CLI binary and resolve its exit code and stdout. */
-function runCli(args: string[], cwd = configDir): Promise<{ code: number; stdout: string; stderr: string }> {
+function runCli(args: string[], cwd = configDir, extraEnv: Record<string, string> = {}): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    const p = spawn(process.execPath, [CLI, ...args], { env: env(), cwd });
+    const p = spawn(process.execPath, [CLI, ...args], { env: { ...env(), ...extraEnv }, cwd });
     let stdout = '';
     let stderr = '';
     p.stdout.on('data', (d) => { stdout += d; });
@@ -146,6 +151,7 @@ async function connectExtension(): Promise<void> {
     const frame = JSON.parse(String(raw));
     if (frame.type === 'dispatch_tool') {
       dispatched.push(frame.tool);
+      dispatchedArgs.push(frame.args);
       if (frame.tool === 'export_script') extension.send(JSON.stringify({
         type: 'dispatch_tool_pending', session_id: frame.session_id, seq_num: frame.seq_num,
         expected_timeout_ms: 90_000,
@@ -199,6 +205,45 @@ describe('CLI exit codes, end to end', () => {
     assert.equal(JSON.parse(stdout).ok, true);
   });
 
+  const rows = (count: number) => ({ dataset: 'ds_e2e', rows: Array.from({ length: count }, (_, id) => ({ id, text: 'r'.repeat(100) })) });
+
+  it('prints a tool result many times a pipe buffer in full when its output is a pipe', async () => {
+    // Every command ends in process.exit, and output still queued for a pipe
+    // was dropped there: a large result arrived as its first 65,536 bytes.
+    nextAck = { success: true, result: rows(2000) };
+    const { code, stdout } = await runCli(['call', 'big_tool', '--tab', '1']);
+    assert.equal(code, 0, stdout.slice(-200));
+    assert.ok(stdout.length > 200_000, `stdout is ${stdout.length} bytes`);
+    assert.equal(JSON.parse(stdout).data.rows.length, 2000);
+  });
+
+  it('a result over the budget is written whole into the directory the CLI ran from, and its path printed', async () => {
+    nextAck = { success: true, result: rows(10_000) };
+    const cwd = mkdtempSync(join(tmpdir(), 'customaise-e2e-cwd-'));
+    try {
+      const { code, stdout } = await runCli(['call', 'big_tool', '--tab', '1'], cwd);
+      assert.equal(code, 0, stdout.slice(-200));
+      const data = JSON.parse(stdout).data;
+      assert.equal(data.delivery, 'file');
+      assert.equal(data.summary.dataset, 'ds_e2e');
+      // The CLI declares its directory as the process sees it: on macOS the
+      // temp directory is reached through a link, /var to /private/var.
+      assert.ok(data.filePath.startsWith(join(realpathSync(cwd), '.customaise', 'tool-results')), data.filePath);
+      assert.equal(JSON.parse(readFileSync(data.filePath, 'utf-8')).rows.length, 10_000);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('CUSTOMAISE_MCP_OUTPUT=inline in the CLI\'s own shell returns it inline, shortened to the budget', async () => {
+    nextAck = { success: true, result: rows(10_000) };
+    const { code, stdout } = await runCli(['call', 'big_tool', '--tab', '1'], configDir, { CUSTOMAISE_MCP_OUTPUT: 'inline' });
+    assert.equal(code, 0, stdout.slice(-200));
+    const data = JSON.parse(stdout).data;
+    assert.deepEqual([data.delivery, data.deliverySource, data.truncated], ['inline', 'argument', true]);
+    assert.ok(data.result.rows.length > 1000 && data.result.rows.length < 10_000);
+  });
+
   it('doctor can reconcile a specific save through authenticated dispatch', async () => {
     nextAck = { success: true, result: { scriptId: 's1', operationId: 'lost-ack', outcome: 'committed' } };
     const before = dispatched.length;
@@ -210,7 +255,8 @@ describe('CLI exit codes, end to end', () => {
 
   it('writes real context files into each HTTP caller workspace and rejects a missing declaration', async () => {
     nextAck = { success: true, result: { overview: { url: 'https://example.com', title: 'Fixture' }, elements: [] } };
-    const record = JSON.parse(readFileSync(join(configDir, 'daemon.json'), 'utf8'));
+    // One record per bridge port: this suite's daemon runs on a free one.
+    const record = JSON.parse(readFileSync(join(configDir, `daemon-${wsPort}.json`), 'utf8'));
     assert.equal(record.workspaceEncoding, 'uri');
     const url = new URL(`http://127.0.0.1:${httpPort}/mcp`);
     const dirs = ['project-a', '日本語 %2F'].map(name => join(configDir, name));
@@ -326,6 +372,104 @@ describe('CLI exit codes, end to end', () => {
     assert.equal(code, 8, stdout + stderr);
     assert.match(stderr, /Failed canonical parse\. Fix the syntax\./);
     assert.match(stderr, /script_save:normalization .*script=mcp_script_/);
+  });
+
+  describe('Script Decisions verbs', () => {
+    const hash = (c: string) => c.repeat(64);
+    const view = { available: true, agentAccess: { fullAccess: true, scriptDecisions: true, locked: false },
+      signedIn: true, tier: 'power_user', scripts: [] };
+
+    it('decisions reads every script, and decisions <id> one, with exactly those arguments', async () => {
+      nextAck = { success: true, result: view };
+      let before = dispatched.length;
+      let r = await runCli(['decisions']);
+      assert.equal(r.code, 0, r.stdout + r.stderr);
+      assert.deepEqual(JSON.parse(r.stdout).data, view);
+      assert.deepEqual(dispatched.slice(before), ['get_script_decisions']);
+      assert.deepEqual(dispatchedArgs.at(-1), {});
+
+      before = dispatched.length;
+      r = await runCli(['decisions', 's1']);
+      assert.equal(r.code, 0, r.stdout + r.stderr);
+      assert.deepEqual(dispatched.slice(before), ['get_script_decisions']);
+      assert.deepEqual(dispatchedArgs.at(-1), { scriptId: 's1' });
+    });
+
+    it('decisions set sends the provider and the hashes, and off without any', async () => {
+      nextAck = { success: true, result: view };
+      let r = await runCli(['decisions', 'set', 's1', 'jev', '--sets', `${hash('a')}, ${hash('b')}`]);
+      assert.equal(r.code, 0, r.stdout + r.stderr);
+      assert.equal(dispatched.at(-1), 'set_script_decisions');
+      assert.deepEqual(dispatchedArgs.at(-1), { scriptId: 's1', provider: 'jev', sets: [hash('a'), hash('b')] });
+
+      r = await runCli(['decisions', 'set', 's1', 'off']);
+      assert.equal(r.code, 0, r.stdout + r.stderr);
+      assert.deepEqual(dispatchedArgs.at(-1), { scriptId: 's1', provider: 'off' });
+    });
+
+    it('a refusal only the person can lift exits 6 and keeps its type and code', async () => {
+      nextAck = { success: false, error: 'Agents cannot choose providers here yet.',
+        error_data: { type: 'person_required', code: 'agent_access_off' } };
+      const { code, stdout, stderr } = await runCli(['decisions', 'set', 's1', 'openai-decisions']);
+      assert.equal(code, 6, stdout);
+      const error = JSON.parse(stdout).error;
+      assert.equal(error.type, 'person_required');
+      assert.equal(error.code, 'agent_access_off');
+      assert.match(stderr, /Agents cannot choose providers here yet/);
+    });
+
+    it('an unconfirmed outcome exits 3, and a stale view exits 8', async () => {
+      nextAck = { success: false, error: 'Script Decisions could not confirm this (connection_uncertain).',
+        error_data: { type: 'service_unavailable', code: 'connection_uncertain' } };
+      let r = await runCli(['decisions', 'set', 's1', 'jev']);
+      assert.equal(r.code, 3, r.stdout);
+      assert.equal(JSON.parse(r.stdout).error.code, 'connection_uncertain');
+
+      nextAck = { success: false, error: 'The script settings changed while this ran.',
+        error_data: { type: 'rejected', code: 'stale_view' } };
+      r = await runCli(['decisions', 's1']);
+      assert.equal(r.code, 8, r.stdout);
+      assert.equal(JSON.parse(r.stdout).error.code, 'stale_view');
+    });
+
+    it('an extension before 1.4.0 is reported as outdated, not as a fault', async () => {
+      for (const [args, command] of [[['decisions'], 'get_script_decisions'],
+        [['decisions', 'set', 's1', 'jev'], 'set_script_decisions']] as const) {
+        nextAck = { success: false, error: `Unknown MCP request type: ${command}` };
+        const { code, stdout } = await runCli([...args]);
+        assert.equal(code, 3, stdout);
+        const error = JSON.parse(stdout).error;
+        assert.equal(error.type, 'extension_outdated');
+        assert.equal(error.minExtensionVersion, '1.4.0');
+        assert.match(error.message, new RegExp(`${command} needs Customaise 1\\.4\\.0 or later`));
+      }
+    });
+
+    it('scripts install says whether the script kept its provider', async () => {
+      nextAck = { success: true, result: { success: true, scriptId: 's1', name: 'Probe', warnings: [],
+        scriptDecisions: { provider: 'jev', kept: false, reason: 'agent_access_off' } } };
+      const { code, stdout } = await runCli(['scripts', 'install', CLI, '--id', 's1']);
+      assert.equal(code, 0, stdout);
+      const decisions = JSON.parse(stdout).data.scriptDecisions;
+      assert.equal(decisions.kept, false);
+      assert.equal(decisions.reason, 'agent_access_off');
+      assert.match(decisions.message, /Jev was not kept.*the person chooses the provider again/);
+    });
+
+    it('doctor reports whether agents may manage Script Decisions', async () => {
+      initSession.agent_permissions = { mode: 'full_access', revision: 'grant-1', scope: 'browser_profile',
+        locked: false, scriptDecisions: true };
+      try {
+        await reconnectExtension();
+        const { stdout } = await runCli(['doctor']);
+        assert.equal(JSON.parse(stdout).data.agentPermissions.scriptDecisions, true);
+      } finally {
+        delete initSession.agent_permissions;
+        await reconnectExtension();
+      }
+      const { stdout } = await runCli(['doctor']);
+      assert.equal(JSON.parse(stdout).data.agentPermissions, null);
+    });
   });
 
   it('exits 3 when the extension goes away', async () => {

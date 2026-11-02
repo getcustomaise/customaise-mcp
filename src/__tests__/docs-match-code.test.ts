@@ -121,7 +121,9 @@ describe('README and --help agree on what --pretty does', () => {
     it('the code really does write the result to stdout', () => {
         // If this ever moves to stderr, the docs above become correct and
         // this test is what tells you to update them.
-        assert.match(cli, /process\.stdout\.write\(JSON\.stringify\(payload/);
+        assert.match(cli, /writeOut\(JSON\.stringify\(payload/);
+        const output = readFileSync(join(ROOT, 'src', 'cli', 'output.ts'), 'utf-8');
+        assert.match(output, /export function writeOut\(text: string\): void \{\s*writeAll\(1, text\);/, 'writeOut no longer writes to stdout (fd 1)');
     });
 });
 

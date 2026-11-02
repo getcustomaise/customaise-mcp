@@ -81,7 +81,16 @@ export function compareVersions(a: string, b: string): number {
  * Semantic states for a session. The server-side cap behaviour branches
  * on these.
  */
-export interface AgentPermissionsSnapshot { mode: 'tool_permissions' | 'full_access'; revision: string; scope: 'browser_profile'; locked: boolean; }
+export interface AgentPermissionsSnapshot {
+  mode: 'tool_permissions' | 'full_access'; revision: string; scope: 'browser_profile'; locked: boolean;
+  /**
+   * Full access's second part: connected agents may choose Script Decisions
+   * providers (set_script_decisions). Only the person turns it on, in the
+   * extension. False from an extension before 1.4.0, which has no such
+   * grant; absent only in a snapshot relayed by a leader before 3.2.9.
+   */
+  scriptDecisions?: boolean;
+}
 
 export type SessionMode =
   | 'verifying'      // extension has not yet verified the account plan
@@ -178,7 +187,10 @@ export function applyInitSession(
   const access = payload.agent_permissions;
   next.agentPermissions = access && ['tool_permissions', 'full_access'].includes(access.mode)
     && typeof access.revision === 'string' && access.scope === 'browser_profile' && typeof access.locked === 'boolean'
-    ? { mode: access.mode, revision: access.revision, scope: access.scope, locked: access.locked } : null;
+    ? { mode: access.mode, revision: access.revision, scope: access.scope, locked: access.locked,
+        // Optional on the wire: an extension before 1.4.0 sends none, and a
+        // malformed value never makes the rest of the snapshot unreadable.
+        scriptDecisions: access.scriptDecisions === true } : null;
   if (typeof payload.authenticated === 'boolean') next.authenticated = payload.authenticated;
   if (typeof payload.session_id === 'string' && payload.session_id.length > 0) {
     next.sessionId = payload.session_id;

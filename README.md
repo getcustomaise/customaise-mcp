@@ -2,7 +2,7 @@
 
 MCP server and CLI that connect AI coding agents to the [Customaise](https://customaise.com) Chrome extension. Manage UserScripts, build AgentScripts, call WebMCP tools inside the user's signed-in browser session, select DOM elements visually, and drive tabs. Drive it over stdio from an IDE, or as a `customaise` command from a shell.
 
-**19 tools, 5 resources plus a script resource template, WebSocket bridge** between your agent and a real Chrome session, whichever door it arrives through.
+**21 tools, 5 resources plus a script resource template, WebSocket bridge** between your agent and a real Chrome session, whichever door it arrives through.
 
 Two ways in. `customaise-mcp` is the MCP server an IDE spawns over stdio.
 `customaise` is a CLI for agents that have a shell instead, driving the same
@@ -89,7 +89,7 @@ args = ["-y", "@customaise/mcp"]
 ### 3. Done
 Your agent can now read and edit UserScripts, build AgentScripts that expose WebMCP tools to it, select DOM elements visually, inspect the console, and take screenshots of the live tab.
 
-## Tools (19)
+## Tools (21)
 
 ### Script Lifecycle
 | Tool | Description |
@@ -133,10 +133,16 @@ Your agent can now read and edit UserScripts, build AgentScripts that expose Web
 | `toggle_ui` | Show or hide the Customaise UI overlay |
 | `sync_scripts` | Bulk export all scripts to a local directory |
 
+### Script Decisions
+| Tool | Description |
+|------|-------------|
+| `get_script_decisions` | Read Script Decisions on this device: whether agents may manage it, saved provider keys, and each script's provider and state; with a script ID, its question lists and their hashes |
+| `set_script_decisions` | Choose a script's provider (Jev or Decisions API) and which question lists are On, or switch it off. Needs the person to turn on Script Decisions under Full access, except off |
+
 ### Diagnostics
 | Tool | Description |
 |------|-------------|
-| `get_bridge_status` | Report extension attachment, plan tier, sign-in, remaining quota and the browser's agent permission mode when supported. Costs no quota itself. |
+| `get_bridge_status` | Report extension attachment, plan tier, sign-in, remaining quota and the browser's agent permission mode, including whether agents may manage Script Decisions, when supported. Costs no quota itself. |
 
 ## Resources (5 plus a template)
 
@@ -148,7 +154,7 @@ Five resources and one script resource template that connected agents can read v
 | `customaise://scripts/{scriptId}` | Full source and metadata for a specific script |
 | `customaise://conventions` | Points at the right handbook for the script type you're working on |
 | `customaise://userscript-conventions` | Full UserScript reference: file structure, IIFE pattern, `GM_*` APIs, symbol-level editing, `@match` and `@namespace` rules |
-| `customaise://agentscript-conventions` | Full AgentScript reference: the `// ==AgentScript==` block, `// @webmcp <tool> <permission>` declarations, `navigator.modelContext.registerTool()`, consent model |
+| `customaise://agentscript-conventions` | Full AgentScript reference: the `// ==AgentScript==` block, `// @webmcp <tool> <permission>` declarations, `document.modelContext.registerTool()`, consent model |
 | `customaise://script-decisions` | Shared UserScript/AgentScript guide: Decisions API questions, the CM_decisions API, working example, device/provider setup, billing and failure handling |
 
 ## Script Decisions in UserScripts and AgentScripts
@@ -172,15 +178,44 @@ is marked **Operated by an AI agent**), and selects a provider in the script's
 Decisions menu (its branch icon, or **Quick Actions → Script Decisions**). Requests then run automatically. Settings
 can pause the device without losing selections; Data & Analytics reports usage
 by device/provider. Provider charges and budgets are separate from Customaise
-browser AI tokens. MCP/CLI cannot set these protected permissions or supply keys.
+browser AI tokens. MCP/CLI cannot supply keys or allow a device.
 WebMCP approval still applies independently to the containing tool.
 
 `create` and `createMany` wait for the answers themselves. Preserve refusals and
 errors; do not resend uncertain work or switch providers automatically. Changing
-a script's code asks for its provider to be chosen again. See the
+a script's code asks for its provider to be chosen again, unless an agent saved
+it under the grant below. See the
 [Script Decisions guide](https://customaise.com/learn/script-decisions).
 
-## Updating to MCP/CLI 3.2.8 and extension 1.3.9
+### Agents choosing providers
+
+Settings → Agent permissions → Full access has a second part, **Script
+Decisions**. Only the person turns it on, through a protected confirmation in
+the extension; no MCP tool or CLI command can. While it is on, connected agents
+can choose a script's provider (Jev or Decisions API) on this device, switch its
+question lists On or Off, and resume a script the loop guard paused for
+repeating the same input (`loop_repeat`). Switching a script's provider off is
+always allowed. Provider keys, the device's Allow Script Decisions switch, daily
+limits, pausing the device, a runaway-loop pause (`loop_runaway`) and scripts
+shared with the person stay with the person; those refusals carry error type
+`person_required` (CLI exit 6), and the agent should tell the person the step
+rather than retry.
+
+| MCP | CLI |
+|---|---|
+| `get_script_decisions({ scriptId? })` | `customaise decisions [id]` |
+| `set_script_decisions({ scriptId, provider, sets? })` | `customaise decisions set <id> <jev\|openai-decisions\|off> [--sets HASH,HASH]` |
+
+`sets` names the question lists to switch On by the hashes `get_script_decisions`
+returns for one script; every other list goes Off. When an agent saves a script
+with `export_script` while Script Decisions is on for agents, Customaise signs
+its provider again for the new code if it was current for the code just
+replaced, and `scriptDecisions` in the result says whether it was kept and, if
+not, why. Without the grant the person chooses the provider again after the
+edit. Both tools need extension 1.4.0 or later; an older extension answers
+`extension_outdated`.
+
+## Updating to MCP/CLI 3.2.9 and extension 1.4.0
 
 The CLI and Desktop bundle ship the same tested runtime dependencies. Runtime
 dependencies are bundled in the npm tarball so fresh installs retain those
@@ -189,17 +224,18 @@ versions. Contributors should use `npm ci`; dependency updates belong in
 
 Update both the extension and the companion for the latest permission controls
 and status reporting. The npm package contains both `customaise-mcp`
-and the `customaise` CLI; Claude Desktop uses the matching 3.2.8 `.mcpb` bundle.
+and the `customaise` CLI; Claude Desktop uses the matching 3.2.9 `.mcpb` bundle.
 Restart all MCP clients and any running Customaise CLI daemon after updating.
-The 19-tool surface and relay protocol 2 are unchanged from 3.2.3.
+Relay protocol 2 is unchanged from 3.2.3. The tool surface grows to 21 with
+`get_script_decisions` and `set_script_decisions`.
 
-The UserScript handbook now covers the 1.3.9 library workflow: Tampermonkey
-ZIP/JSON restore through Settings → Scripts → Manual Restore, preserved source
-and saved values, nine Script options, all five execution timings, API-specific
-callback/Promise forms, IPv6 network declarations, compressed/large responses,
-local dependencies, private-session values and paused updates after edits.
-Read `customaise://userscript-conventions` or run
-`customaise resource userscript-conventions` before editing an imported script.
+The AgentScript handbook now teaches `document.modelContext`, the WebMCP
+standard name that extension 1.4.0 provides; `navigator.modelContext` still
+works in every version. Both handbooks note that Chrome withholds
+secure-context APIs on plain http pages other than localhost, and the
+UserScript handbook describes `@connect` as 1.4.0 reads it. Read
+`customaise://agentscript-conventions` or `customaise://userscript-conventions`,
+or run `customaise resource <name>`, before editing a script.
 The [migration reference](https://customaise.com/learn/userscripts#moving-scripts)
 covers moving a library from Tampermonkey. Customaise provides every GM API and
 metadata key Tampermonkey supports on Chrome.
@@ -218,8 +254,10 @@ Browsers configured to accept approvals only from another device cannot enable
 Full access locally.
 
 `get_bridge_status` and `customaise doctor` expose `agentPermissions` with
-`mode`, `revision`, `scope` and `locked`. Older extensions may return no status.
-There is no MCP/CLI command to grant Full access: the user controls it in the
+`mode`, `revision`, `scope`, `locked` and `scriptDecisions` (whether agents may
+manage Script Decisions; false from an extension before 1.4.0). Older
+extensions may return no status. There is no MCP/CLI command to grant Full
+access or its Script Decisions part: the person controls both in the
 extension. The interactive bottom bar exposes active permissions, DevTools,
 bridge and sync controls; Appearance can keep them visible while off as well.
 
@@ -260,12 +298,12 @@ are retained in memory for up to 15 minutes (128 entries, 32 running saves).
 For edits, pass the `codeHash` returned by `import_script` as
 `export_script.expectedCodeHash` to reject a save based on an outdated import.
 Update all MCP processes together: internal leader/follower relay protocol 2
-adds cancellation ownership. The extension wire protocol and 19-tool count are
-unchanged; the full save contract requires extension 1.3.4.
+adds cancellation ownership. The extension wire protocol is unchanged by it; the
+full save contract requires extension 1.3.4.
 
 ## WebMCP Tool Calls & Consent (HITL)
 
-AgentScripts register tools on web pages via `navigator.modelContext.registerTool(...)`. Each tool is declared in the AgentScript's `// @webmcp <toolName> <permission>` header with one of three permissions:
+AgentScripts register tools on web pages via `document.modelContext.registerTool(...)`, the WebMCP standard name; `navigator.modelContext`, its earlier name, also works and is the one Customaise before 1.4.0 accepts. Each tool is declared in the AgentScript's `// @webmcp <toolName> <permission>` header with one of three permissions:
 
 - **`allow`**: tool executes immediately. ~50 to 100ms round-trip per call (the extension still runs permission checks).
 - **`prompt`**: in the default tool-permissions mode, each call surfaces an in-browser consent modal and blocks until the user approves or denies. User-enabled Full access lets eligible Prompt tools run without that modal; Deny rules and separate DevTools requirements still apply. Up to **5 minutes**. Design for this. Don't chain prompt-gated calls in tight loops, and treat a long `call_webmcp_tool` as normal.
@@ -334,7 +372,7 @@ Each selection includes **stable, tiered selectors** (stable IDs → data attrib
 ```
 1. Read customaise://agentscript-conventions   → get the structure right before writing
 2. get_page_context                            → find stable selectors on the target page
-3. Write .agent.js file                        → declare tools via // @webmcp, register with navigator.modelContext.registerTool()
+3. Write .agent.js file                        → declare tools via // @webmcp, register with document.modelContext.registerTool()
 4. export_script                               → Customaise validates and injects
 5. reload_tab                                  → the AgentScript registers its tools in the page
 6. list_webmcp_tools                           → confirm tools surfaced
@@ -384,7 +422,7 @@ Once `sync_scripts` has been called, the MCP server watches the directory for `.
 | `CUSTOMAISE_CONFIG_DIR` | `~/.config/customaise` | Where the CLI keeps its daemon connection file and remembered tab. Delete this directory to remove everything the CLI stores; uninstalling the extension does not, because these live outside the browser profile |
 | `CUSTOMAISE_CLI_SCOPE` | _(empty)_ | Optional Bot/session name separating remembered tabs within the same working directory. Remembered tabs are always scoped to the working directory; this adds isolation for Bots sharing one directory |
 | `CUSTOMAISE_HTTP_PORT` | `4051` | Loopback port the daemon serves the CLI on. Distinct from `CUSTOMAISE_WS_PORT`, which is the extension's WebSocket bridge |
-| `CUSTOMAISE_MCP_OUTPUT` | `file` | Where `get_page_context`, `get_console_context` and `take_screenshot` put their full payload when the call does not say. `file` writes to disk and returns a summary plus the path; `inline` writes nothing and returns the whole payload (for the screenshot, the image itself) in the response. Set this to `inline` for a client with no filesystem tool. See [Chat clients and file-less agents](#chat-clients-and-file-less-agents) |
+| `CUSTOMAISE_MCP_OUTPUT` | `file` | Where `get_page_context`, `get_console_context` and `take_screenshot` put their full payload, and `call_webmcp_tool` a result over `CUSTOMAISE_MCP_INLINE_MAX_KB`, when the call does not say. `file` writes to disk and returns a summary plus the path; `inline` writes nothing and returns the whole payload (for the screenshot, the image itself) in the response. Set this to `inline` for a client with no filesystem tool. See [Chat clients and file-less agents](#chat-clients-and-file-less-agents) |
 | `CUSTOMAISE_MCP_INLINE_MAX_KB` | `64` | Ceiling on an inline JSON payload. Over it, lists are shortened (never the JSON itself, so it still parses) and the response reports exactly what was dropped |
 | `CUSTOMAISE_MCP_INLINE_IMAGE_MAX_KB` | `1536` | Ceiling on an inline `take_screenshot` image, in KB of base64. Over it the capture is saved to a file instead, because half an image is not an image |
 
@@ -421,6 +459,15 @@ An image cannot be shortened the way a snapshot can, so a capture over
 `CUSTOMAISE_MCP_INLINE_IMAGE_MAX_KB` (1536 KB of base64) falls back to a file
 and tells the caller to retry with `fullPage: false`, which is usually small
 enough, or to raise the ceiling.
+
+`call_webmcp_tool` follows the same setting for a result too large to send
+back, and only for one: a result within `CUSTOMAISE_MCP_INLINE_MAX_KB` always
+comes back exactly as the page's tool returned it. Over it, `file` writes the
+whole result to `.customaise/tool-results/` in the workspace, which keeps the
+newest 20, and returns the path with the result's small values (an id, a count,
+a next step) so the agent can act without opening the file. `inline` returns it
+in the response with long lists shortened. Neither asks for the tool to run
+again, because running a page's tool again can repeat what it did.
 
 Inline JSON responses are capped at `CUSTOMAISE_MCP_INLINE_MAX_KB` (64 KB by
 default). Over the cap the payload is shortened by trimming lists, not by
@@ -507,6 +554,8 @@ customaise scripts enable mcp_script_123      # or disable
 customaise scripts fork shared_abc -o ./mine.agent.js
 customaise scripts rm mcp_script_123
 customaise sync ./customaise-scripts          # bulk export your scripts
+customaise decisions                         # Script Decisions: agent access, keys, script states
+customaise decisions set mcp_script_123 jev  # needs Script Decisions on for agents; off always works
 customaise tabs
 customaise tab reload 42
 customaise use --tab 42                      # remember it for later commands
@@ -541,7 +590,7 @@ stderr. `--pretty` indents the JSON; `-h` or `--help` prints usage, and `customa
 | 3 | daemon or extension unreachable, including after signing out or with "Allow user scripts" off |
 | 4 | signed in, but the token expired or could not be refreshed |
 | 5 | free-tier cap reached |
-| 6 | consent denied by the user |
+| 6 | consent denied, or a change only the person can make (`person_required`) |
 | 7 | consent expired unanswered |
 | 8 | rejected by Customaise (diagnostics in the payload) |
 
@@ -611,7 +660,7 @@ so a stream of replacements cannot create unbounded background work.
 ## Requirements
 
 - **Node.js** ≥ 20
-- **Chrome 147 or later** with Customaise (1.3.9 is the tested pair for 3.2.8), signed in, with **Agent Bridge** on.
+- **Chrome 147 or later** with Customaise (1.4.0 is the tested pair for 3.2.9), signed in, with **Agent Bridge** on.
 
 ## Plan tiers
 

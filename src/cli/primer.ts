@@ -63,9 +63,23 @@ The user enables their device (from another device if that browser is marked
 Operated by an AI agent), then selects a provider in the script’s
 Decisions menu (its branch icon, or Quick Actions → Script Decisions). Scripts
 need @grant CM_decisions and call CM_decisions.create with questions written
-out in the code. This capability requires Power User; MCP/CLI
-cannot grant its permissions. Provider billing and WebMCP approvals are separate.
-Read the resource for bounded calls, result handling and example code.
+out in the code. This capability requires Power User. Provider billing and
+WebMCP approvals are separate. Read the resource for bounded calls, result
+handling and example code.
+
+When the person has turned on Script Decisions under Full access in Agent
+permissions (only they can, in the extension), you can choose a script's
+provider and switch its question lists from here:
+
+\`\`\`sh
+customaise decisions                     # agent access, saved keys, each script's state
+customaise decisions mcp_script_123      # one script: question lists and their hashes
+customaise decisions set mcp_script_123 jev   # or openai-decisions; off always works
+\`\`\`
+
+Keys, this device's access, daily limits and pause, runaway-loop pauses and
+shared scripts stay with the person. Exit 6 from these means only the person
+can make that change: tell them the step the message names, and do not retry.
 
 Sharing uses Quick Actions → Share Script in extension 1.3.7: Publish & share
 for subscriptions with updates, or Send for a 24-hour link to an independent
@@ -105,7 +119,7 @@ code, never on message text:
 | 3 | daemon or extension unreachable; stop, do not retry blindly |
 | 4 | sign-in expired; the user must act |
 | 5 | quota reached; stop and surface the upgrade path |
-| 6 | the user denied consent; a decision, do not retry |
+| 6 | the person denied consent, or only the person can make that change; a decision, do not retry |
 | 7 | consent expired unanswered; may retry once |
 | 8 | Customaise rejected the input; read \`error\` and fix it |
 

@@ -73,6 +73,11 @@ const UNGATED = new Set([
     // Carries the gate in its snapshot rather than as a banner: it reports
     // system status, so the toggle is data here, not an aside.
     'get_bridge_status',
+    // A script's provider and question lists are account settings. Reading
+    // or choosing them is the same with the toggle off; the calls the
+    // provider answers happen later, when a script runs.
+    'get_script_decisions',
+    'set_script_decisions',
 ]);
 
 /** Each registered tool, with whether its handler calls `withGate`. */

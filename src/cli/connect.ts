@@ -24,11 +24,12 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
-import { readDaemonRecord, tokenPath, TOKEN_HEADER, DEFAULT_HTTP_PORT, type DaemonRecord } from '../daemon.js';
+import { readDaemonRecord, tokenPath, TOKEN_HEADER, httpPortFor, requestedWsPort, type DaemonRecord } from '../daemon.js';
 import { workspaceHeaders } from '../daemon-http.js';
 import { PKG_VERSION } from '../build-server.js';
 import { EXIT } from './exit-codes.js';
 import { mkdirSync, accessSync, constants } from 'node:fs';
+import { writeErr } from './output.js';
 
 /** Install before any connect. See (1) above. */
 export function installCrashGuard(fail: (code: number, message: string) => never): void {
@@ -133,7 +134,7 @@ export async function connectToDaemon(
     }
 
     spawnDaemon();
-    const port = Number(process.env.CUSTOMAISE_HTTP_PORT) || DEFAULT_HTTP_PORT;
+    const port = httpPortFor(requestedWsPort());
     record = await waitForDaemon(port);
     if (!record) {
       fail(EXIT.UNAVAILABLE,
@@ -184,7 +185,7 @@ export async function connectToDaemon(
         'Daemon is ' + serverVersion + ' but this CLI is ' + PKG_VERSION +
         ', and restarting it did not help. Stop it by hand: customaise daemon stop');
     }
-    process.stderr.write(
+    writeErr(
       '[customaise] daemon ' + serverVersion + ' != cli ' + PKG_VERSION + ', restarting it\n');
     await client.close().catch(() => {});
     try { process.kill(record.pid, 'SIGTERM'); } catch { /* already gone */ }

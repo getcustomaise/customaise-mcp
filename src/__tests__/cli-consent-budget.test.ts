@@ -65,8 +65,8 @@ describe('the consent budget on customaise call', () => {
             cli.indexOf('const callToolWithConsentBudget'),
             cli.indexOf("switch (verb)"),
         );
-        assert.match(helper, /process\.stderr\.write/, 'the waiting note is gone');
+        assert.match(helper, /writeErr\(/, 'the waiting note is gone');
         assert.match(helper, /clearTimeout/, 'the note timer is never cleared, so a fast call would print it late');
-        assert.ok(!/process\.stdout\.write/.test(helper), 'the note writes to stdout, which corrupts the JSON contract');
+        assert.ok(!/writeOut\(|process\.stdout\.write/.test(helper), 'the note writes to stdout, which corrupts the JSON contract');
     });
 });

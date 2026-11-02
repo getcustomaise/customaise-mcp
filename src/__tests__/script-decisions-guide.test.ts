@@ -6,6 +6,8 @@ import {
   SCRIPT_DECISIONS_EXAMPLE,
   SCRIPT_DECISIONS_QUESTIONS,
 } from '../script-decisions-guide.js';
+import { SERVER_INSTRUCTIONS } from '../build-server.js';
+import { buildPrimer } from '../cli/primer.js';
 
 it('the shipped example grants CM_decisions and has no @decisions header', () => {
   assert.match(SCRIPT_DECISIONS_EXAMPLE, /^\/\/ @grant CM_decisions$/m);
@@ -77,11 +79,45 @@ it('refusals are unanswered, not negative answers', async () => {
   assert.deepEqual(JSON.parse(result.output), { state: 'unanswered' });
 });
 
-it('access and loop-guard errors stop the example with their code', async () => {
+it('access and loop-guard errors stop the example with the sentence they carry, or their code without one', async () => {
   for (const code of ['key_unavailable', 'loop_paused', 'questions_not_in_code']) {
-    const result = await runExample(async () => {
-      throw Object.assign(new Error(`CM_decisions: ${code}`), { code });
+    const said = await runExample(async () => {
+      throw Object.assign(new Error(`Script Decisions stopped for ${code}.`), { code });
     });
-    assert.equal(result.output, `Stopped: ${code}`);
+    assert.equal(said.output, `Stopped: Script Decisions stopped for ${code}.`);
+    const bare = await runExample(async () => {
+      throw Object.assign(new Error(''), { code });
+    });
+    assert.equal(bare.output, `Stopped: ${code}`);
   }
+});
+
+it('the guide teaches the agent tools, the grant behind them and what stays with the person', () => {
+  const guide = SCRIPT_DECISIONS_CONVENTIONS;
+  assert.match(guide, /^Release reference: extension 1\.4\.0 and MCP\/CLI 3\.2\.9\./m);
+  assert.match(guide, /^## Agents and Script Decisions$/m);
+  assert.match(guide, /Only the person turns it on, through a protected confirmation in\s+the extension; no MCP tool or CLI command can/);
+  assert.match(guide, /get_script_decisions, or customaise decisions \[id\]/);
+  assert.match(guide, /set_script_decisions, or customaise decisions set <id>\s+<jev\|openai-decisions\|off> \[--sets HASH,HASH\]/);
+  assert.match(guide, /Switching a\s+script's provider Off is always allowed/);
+  for (const kept of [/provider keys/, /the device's Allow Script\s+Decisions switch/, /daily limits/, /pausing this device/,
+    /runaway loop \(loop_runaway\)/, /scripts shared with them/]) {
+    assert.match(guide, kept);
+  }
+  assert.match(guide, /error type person_required \(CLI exit 6\)[\s\S]{0,80}tell\s+the person, and do not retry/);
+  // The keep-on-edit rule, and its absence without the grant.
+  assert.match(guide, /saves a script with export_script while Script Decisions is on\s+for agents, Customaise signs the\s+provider again for the new code/);
+  assert.match(guide, /Without the grant, or when the provider was not current, the person chooses\s+it again/);
+  assert.doesNotMatch(guide, /neither\s+can MCP\/CLI/);
+  assert.doesNotMatch(guide, /—/);
+});
+
+it('no surface an agent reads still says MCP or the CLI cannot choose a provider', () => {
+  for (const [name, text] of [['guide', SCRIPT_DECISIONS_CONVENTIONS], ['server instructions', SERVER_INSTRUCTIONS],
+    ['CLI primer', buildPrimer('3.2.9')]] as const) {
+    assert.doesNotMatch(text, /MCP(?:\/CLI)?\s+cannot grant its permissions|neither\s+can MCP\/CLI/, name);
+    assert.match(text, /set_script_decisions|customaise decisions set/, `${name} does not name the way to choose a provider`);
+    assert.doesNotMatch(text, /—/, name);
+  }
+  assert.match(SERVER_INSTRUCTIONS, /No tool can turn that on, and keys, device access, daily limits, the device pause, runaway-loop pauses and shared scripts stay with the person/);
 });

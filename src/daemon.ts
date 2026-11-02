@@ -35,12 +35,31 @@ import { createDaemonHttpHandler } from './daemon-http.js';
 export { WORKSPACE_HEADER } from './daemon-http.js';
 
 export const DEFAULT_HTTP_PORT = 4051;
+export const DEFAULT_WS_PORT = 4050;
 export const TOKEN_HEADER = 'x-customaise-token';
-/** Where the daemon's token lives. Same resolution in the daemon and the CLI. */
-export function tokenPath(): string {
+/** The bridge port the extension dials: 4050 for production, 4150 for the staging build. */
+export function requestedWsPort(): number {
+  return Number(process.env.CUSTOMAISE_WS_PORT || process.env.VIBEMONKEY_WS_PORT) || DEFAULT_WS_PORT;
+}
+/**
+ * The daemon's loopback port. Beside another bridge port it defaults to the
+ * next one up (4151 for 4150), so a staging daemon never contends for the
+ * production daemon's 4051.
+ */
+export function httpPortFor(wsPort: number): number {
+  return Number(process.env.CUSTOMAISE_HTTP_PORT) || (wsPort === DEFAULT_WS_PORT ? DEFAULT_HTTP_PORT : wsPort + 1);
+}
+/**
+ * Where a daemon's record (its token and ports) lives: one per bridge port.
+ * A single shared record sent a CLI pointed at staging to the production
+ * daemon whenever one was running, and the reverse, so commands meant for one
+ * extension reached the other. The production port keeps the original name.
+ * Same resolution in the daemon and the CLI.
+ */
+export function tokenPath(wsPort = requestedWsPort()): string {
   const base = process.env.CUSTOMAISE_CONFIG_DIR
     || join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'customaise');
-  return join(base, 'daemon.json');
+  return join(base, wsPort === DEFAULT_WS_PORT ? 'daemon.json' : `daemon-${wsPort}.json`);
 }
 
 export interface DaemonRecord {
@@ -60,11 +79,18 @@ export interface DaemonRecord {
   workspaceEncoding?: 'uri';
 }
 
-export function readDaemonRecord(): DaemonRecord | null {
-  try {
-    const raw = JSON.parse(readFileSync(tokenPath(), 'utf-8'));
-    if (typeof raw?.token === 'string' && typeof raw?.port === 'number') return raw as DaemonRecord;
-  } catch { /* absent or unreadable is the same answer */ }
+export function readDaemonRecord(wsPort = requestedWsPort()): DaemonRecord | null {
+  // Before records were per port, every daemon wrote daemon.json.
+  const paths = wsPort === DEFAULT_WS_PORT ? [tokenPath(wsPort)] : [tokenPath(wsPort), tokenPath(DEFAULT_WS_PORT)];
+  for (const path of paths) {
+    try {
+      const raw = JSON.parse(readFileSync(path, 'utf-8'));
+      // A record for another bridge port is another extension's daemon. One
+      // written before records named their port can only be the default's.
+      if (typeof raw?.token === 'string' && typeof raw?.port === 'number'
+        && (raw.wsPort ?? DEFAULT_WS_PORT) === wsPort) return raw as DaemonRecord;
+    } catch { /* absent or unreadable is the same answer */ }
+  }
   return null;
 }
 
@@ -90,7 +116,7 @@ function tokenMatches(presented: unknown, expected: string): boolean {
 }
 
 function writeDaemonRecord(rec: DaemonRecord): void {
-  const p = tokenPath();
+  const p = tokenPath(rec.wsPort ?? DEFAULT_WS_PORT);
   // 0700 on the directory, not just 0600 on the file. The file is what holds
   // the secret, but a world-listable directory tells another user on the box
   // that a daemon is running here and what it is called. chmod separately
@@ -104,12 +130,12 @@ function writeDaemonRecord(rec: DaemonRecord): void {
   renameSync(tmp, p);
 }
 
-function clearDaemonRecord(port: number): void {
-  const rec = readDaemonRecord();
+function clearDaemonRecord(port: number, wsPort: number): void {
+  const rec = readDaemonRecord(wsPort);
   // Only clear a record that is ours. A daemon that lost the bind must not
   // delete the winner's token on its way out.
   if (rec && rec.pid === process.pid && rec.port === port) {
-    try { rmSync(tokenPath(), { force: true }); } catch { /* best effort */ }
+    try { rmSync(tokenPath(wsPort), { force: true }); } catch { /* best effort */ }
   }
 }
 
@@ -123,8 +149,8 @@ export interface DaemonOptions {
 }
 
 export async function startDaemon(opts: DaemonOptions = {}): Promise<void> {
-  const port = opts.port ?? (Number(process.env.CUSTOMAISE_HTTP_PORT) || DEFAULT_HTTP_PORT);
-  const wsPort = opts.wsPort ?? (Number(process.env.CUSTOMAISE_WS_PORT) || 4050);
+  const wsPort = opts.wsPort ?? requestedWsPort();
+  const port = opts.port ?? httpPortFor(wsPort);
   const idleMs = opts.idleMs ?? 30 * 60 * 1000;
 
   const bridge = await createBridge(wsPort);
@@ -174,7 +200,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     if (idleTimer) clearInterval(idleTimer);
-    clearDaemonRecord(port);
+    clearDaemonRecord(port, wsPort);
     // Stop accepting immediately so a replacement can bind straight away.
     await new Promise<void>((r) => server.close(() => r()));
     fileWatcher.stop();

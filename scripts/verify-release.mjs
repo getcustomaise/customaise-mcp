@@ -129,7 +129,7 @@ try {
   assert.equal(manifest.server.entry_point, 'server/index.js');
   assert.equal(manifest.server.mcp_config.env.CUSTOMAISE_MCP_OUTPUT, 'inline');
   const declaredTools = manifest.tools.map((tool) => tool.name).sort();
-  assert.equal(declaredTools.length, 19);
+  assert.equal(declaredTools.length, 21);
   const serverDir = join(bundleDir, 'server');
   assert.equal(JSON.parse(readFileSync(join(serverDir, 'package.json'), 'utf8')).version, pkg.version);
   verifyPayload(serverDir);

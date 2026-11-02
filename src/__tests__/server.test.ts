@@ -101,6 +101,9 @@ const EXPECTED_TOOLS = [
   'take_screenshot',
   'toggle_ui',
   'sync_scripts',
+  // Script Decisions for agents, under the person's grant (extension 1.4.0).
+  'get_script_decisions',
+  'set_script_decisions',
 ];
 
 const EXPECTED_PROMPTS: string[] = [];
@@ -136,8 +139,8 @@ describe('Server Tool Registration', () => {
 
   // ─── Registration Counts ────────────────────────────────────────
 
-  it('registers exactly 19 tools', () => {
-    assert.equal(server.registerTool.mock.callCount(), 19);
+  it('registers exactly 21 tools', () => {
+    assert.equal(server.registerTool.mock.callCount(), 21);
   });
 
   it('registers exactly 0 prompts', () => {
@@ -180,6 +183,8 @@ describe('Server Tool Registration', () => {
     assert.match(text, /Enable the intended AgentScript in Customaise’s Scripts panel/);
     assert.match(text, /each script has its own enable switch/);
     assert.match(text, /Reload that page after installing or changing an AgentScript/);
+    assert.match(text, /\*\*Internal tools on plain http\.\*\* An intranet app served over http from anything but localhost/);
+    assert.match(text, /Tools still register; make ids from `crypto\.getRandomValues` and copy with `GM_setClipboard`/);
     assert.match(text, /Chrome's Allow user scripts setting is off/);
     assert.match(text, /The intended script is disabled/);
     assert.doesNotMatch(text, /global AgentScripts (?:toggle|gate)|Even with the global gate on|Settings → Script Management → ON/i);
@@ -195,8 +200,11 @@ describe('Server Tool Registration', () => {
       'preserve their source and metadata', 'In the page with a scoped window',
       'Legacy methods return undefined, including without a callback',
       'Return values are API-specific', 'last private window closes',
-      '[::1]:8080', 'Missing transfer data is an error',
+      'bracketed IPv6 address (`[::1]`) only that host', 'a port, a whole URL or a pattern matches nothing',
+      'Missing transfer data is an error',
       'document-start` cannot guarantee running before every website script',
+      'Chrome withholds secure-context APIs from the page and from the script',
+      "Copy with `GM_setClipboard`, make ids from `crypto.getRandomValues`, and don't test such a script only on localhost",
       'GM_webRequest` is not provided', 'There is no MCP backup-import command',
     ]) assert.ok(text.includes(contract), `Missing handbook contract: ${contract}`);
     assert.doesNotMatch(text, /MUST be wrapped|100% element targeting|dom_banner_123/);
@@ -214,6 +222,8 @@ describe('Server Tool Registration', () => {
       { tool: 'list_tabs', bridgeType: 'list_tabs' },
       { tool: 'reload_tab', bridgeType: 'reload_tab', args: { tabId: 1 } },
       { tool: 'toggle_ui', bridgeType: 'show_ui', args: { tabId: 1, panel: 'scripts' } },
+      { tool: 'get_script_decisions', bridgeType: 'get_script_decisions', args: { scriptId: 'test-id' } },
+      { tool: 'set_script_decisions', bridgeType: 'set_script_decisions', args: { scriptId: 'test-id', provider: 'jev' } },
     ];
 
     for (const { tool, bridgeType, args } of PASSTHROUGH_TOOLS) {
