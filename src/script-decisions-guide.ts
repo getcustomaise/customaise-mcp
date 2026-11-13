@@ -117,7 +117,7 @@ if (found?.type === 'predicate' && found.probability >= 0.5 && mug?.type === 'bo
 
 export const SCRIPT_DECISIONS_CONVENTIONS = `# Script Decisions for Customaise
 
-Release reference: extension 1.4.0 and MCP/CLI 3.2.9. Script Decisions is a
+Release reference: extension 1.4.1 and MCP/CLI 3.3.0. Script Decisions is a
 Power User capability; a trial counts. The user saves a provider key, allows this device and
 chooses a provider for the script, or lets connected agents choose it (see
 Agents and Script Decisions). Before use, check its state with
@@ -213,7 +213,10 @@ last 24 hours comes back with reused: true and every usage count 0.
 reuse: false sends every input again instead, pending ones included. An
 input that reads something by link, such as an image URL, is always sent,
 since what the link shows can change; a data: URL is not a link. usage is the provider's:
-input_tokens, output_tokens and total_tokens.
+input_tokens, output_tokens and total_tokens, with input_tokens_details
+(cached_tokens, cache_write_tokens) and output_tokens_details
+(reasoning_tokens) when the provider reports them. Those details are part of
+input_tokens and output_tokens, not added to them.
 
 ## Questions must be written out in the code
 

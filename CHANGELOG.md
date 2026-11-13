@@ -2,6 +2,12 @@
 
 All notable changes to `@customaise/mcp` will be documented in this file.
 
+## [3.3.0] - 2026-11-13
+
+- Teach `untrustedContentHint` in `customaise://agentscript-conventions`: it marks a tool whose result carries text other people wrote, such as posts, reviews or comments, and goes in `annotations` beside `readOnlyHint` and `consequentialHint`. The `gh_list_open_issues` example sets it. Extension 1.4.1 reads and forwards it.
+- `customaise://script-decisions`, also available through `customaise resource script-decisions`, describes a Decision's `usage` as extension 1.4.1 returns it: `input_tokens_details` (`cached_tokens`, `cache_write_tokens`) and `output_tokens_details` (`reasoning_tokens`) when the provider reports them, counted within `input_tokens` and `output_tokens`, not added to them.
+- Pair with extension **1.4.1** and the matching **3.3.0** Claude Desktop bundle. The 21 tools, approval rules and relay protocol are unchanged.
+
 ## [3.2.9] - 2026-11-02
 
 - Teach `document.modelContext`, the WebMCP standard name since Chromium 150, in `customaise://agentscript-conventions`. Customaise 1.4.0 and later provide it; `navigator.modelContext` works in every version. A bare `document.modelContext` reaches the script's own object. A new section covers unregistering by signal, `annotations`, `execute(input, { signal })`, returned `{ error }` values and an awaitable `registerTool`.

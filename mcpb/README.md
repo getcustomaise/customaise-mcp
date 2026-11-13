@@ -25,7 +25,7 @@ Everything runs in the browser session where you're already signed in. No API ke
 
 ## Before you install
 
-1. Install the [Customaise Chrome extension](https://customaise.com/install) from the Chrome Web Store on Chrome 147 or later, the tested release baseline for extension 1.4.0.
+1. Install the [Customaise Chrome extension](https://customaise.com/install) from the Chrome Web Store on Chrome 147 or later, the tested release baseline for extension 1.4.1.
 2. Sign in to Customaise. The extension is the full product; a Power User plan unlocks unlimited use of this MCP bridge.
 3. Open Customaise → Settings → MCP & Terminal and enable Agent Bridge.
 
@@ -60,9 +60,9 @@ Claude Desktop spawns this bundle as a local Node.js process. The bundle opens a
 
 ## Script Decisions reference
 
-This 3.2.9 bundle includes `customaise://script-decisions`, alongside the UserScript and AgentScript handbooks. It explains the questions written in the code, the CM_decisions API, a working example and bounded recovery. Pair with extension 1.4.0 (Script Decisions was introduced in 1.3.8). Script Decisions is a Power User capability. Saved keys and device authorisation belong to the person's account and extension controls. When the person turns on Script Decisions under Full access in Agent permissions, Claude can choose a script's provider with `set_script_decisions`; otherwise the person chooses it in the script's Decisions menu. Provider charges and WebMCP approval are separate.
+This 3.3.0 bundle includes `customaise://script-decisions`, alongside the UserScript and AgentScript handbooks. It explains the questions written in the code, the CM_decisions API, a working example and bounded recovery. Pair with extension 1.4.1 (Script Decisions was introduced in 1.3.8). Script Decisions is a Power User capability. Saved keys and device authorisation belong to the person's account and extension controls. When the person turns on Script Decisions under Full access in Agent permissions, Claude can choose a script's provider with `set_script_decisions`; otherwise the person chooses it in the script's Decisions menu. Provider charges and WebMCP approval are separate.
 
-## UserScript reference for extension 1.4.0
+## UserScript reference for extension 1.4.1
 
 Read `customaise://userscript-conventions` before writing or changing a UserScript.
 It covers backup migration, source preservation, callback/Promise forms, network

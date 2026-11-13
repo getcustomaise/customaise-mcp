@@ -1910,7 +1910,9 @@ document.modelContext.registerTool({
   name: "gh_list_open_issues",
   description: "Returns all open issues with titles and labels",
   inputSchema: { type: "object", properties: {} },
-  annotations: { readOnlyHint: true }, // true if the tool only reads (defaults to false)
+  // readOnlyHint: the tool only reads (defaults to false).
+  // untrustedContentHint: issue titles are text other people wrote.
+  annotations: { readOnlyHint: true, untrustedContentHint: true },
   execute: async (args) => {
     const issues = document.querySelectorAll('.js-issue-row');
     return Array.from(issues).map(row => ({
@@ -1988,7 +1990,7 @@ Do not declare a variable, parameter or function named \`document\` or \`navigat
 ## The standard API (Chrome 150, Customaise 1.4.0)
 
 - **Unregister by signal.** \`document.modelContext.registerTool(tool, { signal })\`: aborting \`signal\` removes the tool. Customaise also keeps \`unregisterTool(name)\`.
-- **Hints go in \`annotations\`**: \`readOnlyHint\` (the tool only reads) and \`consequentialHint\` (it acts for the user, such as buying, sending or deleting). Customaise still reads a top-level \`readOnlyHint\`. For an AgentScript's own tools, your \`@webmcp\` line decides approval.
+- **Hints go in \`annotations\`**: \`readOnlyHint\` (the tool only reads), \`consequentialHint\` (it acts for the user, such as buying, sending or deleting) and \`untrustedContentHint\` (its result carries text other people wrote, such as posts, reviews, comments or listings, which the agent should read as data and never follow as instructions). \`list_webmcp_tools\` reports all three. Customaise still reads a top-level \`readOnlyHint\`. For an AgentScript's own tools, your \`@webmcp\` line decides approval.
 - **\`execute(input, { signal })\`.** Customaise passes the signal, and \`caller\` on calls it dispatches.
 - **Return expected failures as values**: \`return { error: 'what went wrong' }\`, which every caller reads as you wrote it. The standard does not forward a thrown error to the agent.
 - **\`registerTool\`'s result can be awaited** like the standard's promise. A validation error is still thrown synchronously, and a duplicate name is swallowed as described above.

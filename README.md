@@ -215,7 +215,7 @@ not, why. Without the grant the person chooses the provider again after the
 edit. Both tools need extension 1.4.0 or later; an older extension answers
 `extension_outdated`.
 
-## Updating to MCP/CLI 3.2.9 and extension 1.4.0
+## Updating to MCP/CLI 3.3.0 and extension 1.4.1
 
 The CLI and Desktop bundle ship the same tested runtime dependencies. Runtime
 dependencies are bundled in the npm tarball so fresh installs retain those
@@ -224,16 +224,18 @@ versions. Contributors should use `npm ci`; dependency updates belong in
 
 Update both the extension and the companion for the latest permission controls
 and status reporting. The npm package contains both `customaise-mcp`
-and the `customaise` CLI; Claude Desktop uses the matching 3.2.9 `.mcpb` bundle.
+and the `customaise` CLI; Claude Desktop uses the matching 3.3.0 `.mcpb` bundle.
 Restart all MCP clients and any running Customaise CLI daemon after updating.
-Relay protocol 2 is unchanged from 3.2.3. The tool surface grows to 21 with
-`get_script_decisions` and `set_script_decisions`.
+Relay protocol 2 is unchanged from 3.2.3, and the 21 tools and their approval
+rules from 3.2.9.
 
-The AgentScript handbook now teaches `document.modelContext`, the WebMCP
-standard name that extension 1.4.0 provides; `navigator.modelContext` still
-works in every version. Both handbooks note that Chrome withholds
-secure-context APIs on plain http pages other than localhost, and the
-UserScript handbook describes `@connect` as 1.4.0 reads it. Read
+The AgentScript handbook now teaches `untrustedContentHint`, which marks a
+tool whose result carries text other people wrote, such as posts, reviews or
+comments; extension 1.4.1 reads and forwards it. The Script Decisions guide
+describes the token details a Decision's `usage` carries in 1.4.1. The
+handbooks still teach `document.modelContext`, the WebMCP standard name that
+extension 1.4.0 and later provide; `navigator.modelContext` works in every
+version. Read
 `customaise://agentscript-conventions` or `customaise://userscript-conventions`,
 or run `customaise resource <name>`, before editing a script.
 The [migration reference](https://customaise.com/learn/userscripts#moving-scripts)
@@ -660,7 +662,7 @@ so a stream of replacements cannot create unbounded background work.
 ## Requirements
 
 - **Node.js** ≥ 20
-- **Chrome 147 or later** with Customaise (1.4.0 is the tested pair for 3.2.9), signed in, with **Agent Bridge** on.
+- **Chrome 147 or later** with Customaise (1.4.1 is the tested pair for 3.3.0), signed in, with **Agent Bridge** on.
 
 ## Plan tiers
 
