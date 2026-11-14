@@ -16,7 +16,7 @@ Describe the feature or change you'd like to see.
 How would you use this feature in your workflow?
 
 **IDE / Agent**
-Which IDE or AI agent are you using? [e.g. Claude Code, Cursor, Codex, Kiro, Antigravity, Claude Desktop]
+Which IDE or AI agent are you using? [e.g. Claude Code, Cursor, Codex, Kiro, Antigravity, Claude Desktop, Grok Bot]
 
 **Additional context**
 Any other details, screenshots, or references.

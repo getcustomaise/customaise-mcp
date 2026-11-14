@@ -12,9 +12,9 @@ A clear description of what the bug is.
 **Environment**
 - OS: [e.g. macOS 15, Windows 11, Ubuntu 24]
 - Node.js version: [e.g. 22.x]
-- Agent or IDE: [e.g. Claude Code, Cursor, Codex, Kiro, Antigravity, Claude Desktop]
-- MCP package version: [run customaise --version, e.g. 3.2.8]
-- Customaise extension version: [e.g. 1.3.9, in extension Settings]
+- Agent or IDE: [e.g. Claude Code, Cursor, Codex, Kiro, Antigravity, Claude Desktop, Grok Bot]
+- MCP package version: [run customaise --version, e.g. 3.3.0]
+- Customaise extension version: [e.g. 1.4.1, in extension Settings]
 - Chrome version: [e.g. 149, from chrome://version]
 
 **Steps to reproduce**
