@@ -2,6 +2,15 @@
 
 All notable changes to `@customaise/mcp` will be documented in this file.
 
+## [3.4.0] - 2026-11-18
+
+- `customaise://script-decisions`, also available through `customaise resource script-decisions`, covers the Gemini Decisions API, the third Script Decisions provider in extension 1.5.0: its content blocks for audio, video and PDF documents, up to 1,000 questions and 255 levels, `input_tokens_by_modality` in a Decision's `usage`, and the `content_blocked` code for input its safety filters stop.
+- The guide has a new section, The three providers, that compares Jev, the OpenAI Decisions API and the Gemini Decisions API (what each reads, its limits and its list price) and says which inputs and questions run on which, so a script can be written to run on all three.
+- `set_script_decisions` and `customaise decisions set` take `gemini-decisions`. With extension 1.5.0, `get_script_decisions` returns `supported` for each script, the providers that can answer at least one of its question lists, and with a `scriptId` the providers that answer each list.
+- With extension 1.5.0 a script can be given a provider that answers only some of its question lists: the others stay Off and their calls stop with `task_off`. The guide shows how to ask a provider-specific question, such as a Box question, in a list of its own and carry on without it elsewhere.
+- OpenAI's provider is named OpenAI Decisions API in tool results and the guide. Its id, `openai-decisions`, is unchanged.
+- Pair with extension **1.5.0** and the matching **3.4.0** Claude Desktop bundle. The 21 tools, approval rules and relay protocol are unchanged.
+
 ## [3.3.0] - 2026-11-13
 
 - Teach `untrustedContentHint` in `customaise://agentscript-conventions`: it marks a tool whose result carries text other people wrote, such as posts, reviews or comments, and goes in `annotations` beside `readOnlyHint` and `consequentialHint`. The `gh_list_open_issues` example sets it. Extension 1.4.1 reads and forwards it.

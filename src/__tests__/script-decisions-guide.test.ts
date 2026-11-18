@@ -94,11 +94,11 @@ it('access and loop-guard errors stop the example with the sentence they carry, 
 
 it('the guide teaches the agent tools, the grant behind them and what stays with the person', () => {
   const guide = SCRIPT_DECISIONS_CONVENTIONS;
-  assert.match(guide, /^Release reference: extension 1\.4\.1 and MCP\/CLI 3\.3\.0\./m);
+  assert.match(guide, /^Release reference: extension 1\.5\.0 and MCP\/CLI 3\.4\.0\./m);
   assert.match(guide, /^## Agents and Script Decisions$/m);
   assert.match(guide, /Only the person turns it on, through a protected confirmation in\s+the extension; no MCP tool or CLI command can/);
   assert.match(guide, /get_script_decisions, or customaise decisions \[id\]/);
-  assert.match(guide, /set_script_decisions, or customaise decisions set <id>\s+<jev\|openai-decisions\|off> \[--sets HASH,HASH\]/);
+  assert.match(guide, /set_script_decisions, or customaise decisions set <id>\s+<jev\|openai-decisions\|gemini-decisions\|off> \[--sets HASH,HASH\]/);
   assert.match(guide, /Switching a\s+script's provider Off is always allowed/);
   for (const kept of [/provider keys/, /the device's Allow Script\s+Decisions switch/, /daily limits/, /pausing this device/,
     /runaway loop \(loop_runaway\)/, /scripts shared with them/]) {

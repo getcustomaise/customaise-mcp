@@ -137,7 +137,7 @@ Your agent can now read and edit UserScripts, build AgentScripts that expose Web
 | Tool | Description |
 |------|-------------|
 | `get_script_decisions` | Read Script Decisions on this device: whether agents may manage it, saved provider keys, and each script's provider and state; with a script ID, its question lists and their hashes |
-| `set_script_decisions` | Choose a script's provider (Jev or Decisions API) and which question lists are On, or switch it off. Needs the person to turn on Script Decisions under Full access, except off |
+| `set_script_decisions` | Choose a script's provider (Jev, OpenAI Decisions API or Gemini Decisions API) and which question lists are On, or switch it off. Needs the person to turn on Script Decisions under Full access, except off |
 
 ### Diagnostics
 | Tool | Description |
@@ -155,7 +155,7 @@ Five resources and one script resource template that connected agents can read v
 | `customaise://conventions` | Points at the right handbook for the script type you're working on |
 | `customaise://userscript-conventions` | Full UserScript reference: file structure, IIFE pattern, `GM_*` APIs, symbol-level editing, `@match` and `@namespace` rules |
 | `customaise://agentscript-conventions` | Full AgentScript reference: the `// ==AgentScript==` block, `// @webmcp <tool> <permission>` declarations, `document.modelContext.registerTool()`, consent model |
-| `customaise://script-decisions` | Shared UserScript/AgentScript guide: Decisions API questions, the CM_decisions API, working example, device/provider setup, billing and failure handling |
+| `customaise://script-decisions` | Shared UserScript/AgentScript guide: the question format, the CM_decisions API, the three providers compared, working example, device/provider setup, billing and failure handling |
 
 ## Script Decisions in UserScripts and AgentScripts
 
@@ -169,10 +169,10 @@ customaise resource script-decisions
 Use it for bounded text classification, relevance checks and scoring; use ordinary
 code for extraction, exact rules and actions. Both script engines declare
 `@grant CM_decisions` and call `CM_decisions.create` or `createMany` with
-Decisions API questions written out in the code. The resource contains a complete
+questions in the OpenAI Decisions API format, written out in the code. The resource contains a complete
 UserScript and instructions for wrapping the same helper in an AgentScript tool.
 
-The user saves separate Jev/Decisions API keys on `/account#script-decisions`,
+The user saves a separate Jev, OpenAI Decisions API or Gemini Decisions API key on `/account#script-decisions`,
 enables the device in **Your Devices** (from another device when that browser
 is marked **Operated by an AI agent**), and selects a provider in the script's
 Decisions menu (its branch icon, or **Quick Actions → Script Decisions**). Requests then run automatically. Settings
@@ -192,7 +192,7 @@ it under the grant below. See the
 Settings → Agent permissions → Full access has a second part, **Script
 Decisions**. Only the person turns it on, through a protected confirmation in
 the extension; no MCP tool or CLI command can. While it is on, connected agents
-can choose a script's provider (Jev or Decisions API) on this device, switch its
+can choose a script's provider (Jev, OpenAI Decisions API or Gemini Decisions API) on this device, switch its
 question lists On or Off, and resume a script the loop guard paused for
 repeating the same input (`loop_repeat`). Switching a script's provider off is
 always allowed. Provider keys, the device's Allow Script Decisions switch, daily
@@ -215,7 +215,7 @@ not, why. Without the grant the person chooses the provider again after the
 edit. Both tools need extension 1.4.0 or later; an older extension answers
 `extension_outdated`.
 
-## Updating to MCP/CLI 3.3.0 and extension 1.4.1
+## Updating to MCP/CLI 3.4.0 and extension 1.5.0
 
 The CLI and Desktop bundle ship the same tested runtime dependencies. Runtime
 dependencies are bundled in the npm tarball so fresh installs retain those
@@ -224,15 +224,19 @@ versions. Contributors should use `npm ci`; dependency updates belong in
 
 Update both the extension and the companion for the latest permission controls
 and status reporting. The npm package contains both `customaise-mcp`
-and the `customaise` CLI; Claude Desktop uses the matching 3.3.0 `.mcpb` bundle.
+and the `customaise` CLI; Claude Desktop uses the matching 3.4.0 `.mcpb` bundle.
 Restart all MCP clients and any running Customaise CLI daemon after updating.
 Relay protocol 2 is unchanged from 3.2.3, and the 21 tools and their approval
 rules from 3.2.9.
 
-The AgentScript handbook now teaches `untrustedContentHint`, which marks a
-tool whose result carries text other people wrote, such as posts, reviews or
-comments; extension 1.4.1 reads and forwards it. The Script Decisions guide
-describes the token details a Decision's `usage` carries in 1.4.1. The
+Extension 1.5.0 adds the Gemini Decisions API as a third Script Decisions
+provider, beside Jev and the OpenAI Decisions API. The Script Decisions guide
+compares the three, shows Gemini's inputs (audio, video and PDF documents as
+well as text and images) and says what runs on which provider.
+`set_script_decisions` takes `gemini-decisions`, and `get_script_decisions`
+lists the providers that can answer each script. The AgentScript handbook
+teaches `untrustedContentHint`, which extension 1.4.1 and later read and
+forward. The
 handbooks still teach `document.modelContext`, the WebMCP standard name that
 extension 1.4.0 and later provide; `navigator.modelContext` works in every
 version. Read
@@ -662,7 +666,7 @@ so a stream of replacements cannot create unbounded background work.
 ## Requirements
 
 - **Node.js** ≥ 20
-- **Chrome 147 or later** with Customaise (1.4.1 is the tested pair for 3.3.0), signed in, with **Agent Bridge** on.
+- **Chrome 147 or later** with Customaise (1.5.0 is the tested pair for 3.4.0), signed in, with **Agent Bridge** on.
 
 ## Plan tiers
 

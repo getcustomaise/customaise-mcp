@@ -58,7 +58,7 @@ customaise resource agentscript-conventions       # tools for AI agents
 customaise resource script-decisions              # paid typed decisions inside either script type
 \`\`\`
 
-Script Decisions uses separate Jev or Decisions API keys saved on /account.
+Script Decisions uses separate Jev, OpenAI Decisions API or Gemini Decisions API keys saved on /account.
 The user enables their device (from another device if that browser is marked
 Operated by an AI agent), then selects a provider in the script’s
 Decisions menu (its branch icon, or Quick Actions → Script Decisions). Scripts
@@ -74,7 +74,7 @@ provider and switch its question lists from here:
 \`\`\`sh
 customaise decisions                     # agent access, saved keys, each script's state
 customaise decisions mcp_script_123      # one script: question lists and their hashes
-customaise decisions set mcp_script_123 jev   # or openai-decisions; off always works
+customaise decisions set mcp_script_123 jev   # or openai-decisions, gemini-decisions; off always works
 \`\`\`
 
 Keys, this device's access, daily limits and pause, runaway-loop pauses and

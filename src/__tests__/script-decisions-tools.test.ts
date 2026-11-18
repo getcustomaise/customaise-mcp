@@ -226,7 +226,7 @@ describe('export_script reports the script provider after an edit', () => {
     const s = setup(async () => ({ success: true, scriptId: 's1',
       scriptDecisions: { provider: 'openai-decisions', kept: false, reason: 'agent_access_off' } }));
     const out = await s.call('export_script', { filePath: file, scriptId: 's1' });
-    assert.match(out.content[0].text, /^Script Decisions: Decisions API was not kept for the new code: Script Decisions is not turned on for agents, so the person chooses the provider again in the script's Decisions menu\./);
+    assert.match(out.content[0].text, /^Script Decisions: OpenAI Decisions API was not kept for the new code: Script Decisions is not turned on for agents, so the person chooses the provider again in the script's Decisions menu\./);
     assert.equal(out.structuredContent.scriptDecisions.reason, 'agent_access_off');
     assert.match(out.structuredContent.scriptDecisions.message, /the person chooses the provider again/);
   });
@@ -242,7 +242,7 @@ describe('export_script reports the script provider after an edit', () => {
   it('describes every outcome the extension reports, without em dashes', () => {
     const line = (value: unknown) => scriptDecisionsAfterEdit(value) ?? '';
     const cases: Array<[unknown, RegExp]> = [
-      [{ provider: 'openai-decisions', kept: true }, /^Script Decisions: Decisions API stays chosen for the new code\.$/],
+      [{ provider: 'openai-decisions', kept: true }, /^Script Decisions: OpenAI Decisions API stays chosen for the new code\.$/],
       [{ provider: null, kept: false, reason: 'no_provider' }, /no provider is chosen for this script yet/],
       [{ provider: 'jev', kept: false, reason: 'permission_mode_changed' }, /not turned on for agents, so the person chooses the provider again/],
       [{ provider: 'jev', kept: false, reason: 'paused', pausedReason: 'loop_repeat' },
@@ -257,7 +257,7 @@ describe('export_script reports the script provider after an edit', () => {
       [{ provider: 'jev', kept: false, reason: 'version_held' },
         /the version the person holds for this script cannot answer its new questions\. Only they can choose another, in the script's Decisions menu/],
       [{ provider: 'openai-decisions', kept: false, reason: 'version_unsupported' },
-        /no version of Decisions API answers the new questions\. Choose another provider with set_script_decisions/],
+        /no version of OpenAI Decisions API answers the new questions\. Choose another provider with set_script_decisions/],
       [{ provider: 'jev', kept: false, reason: 'connection_uncertain' }, /could not confirm whether the provider was kept for the new code\. Check/],
       [{ kept: false, reason: 'connection_uncertain' }, /could not confirm whether the provider was kept for the new code\. Check/],
       [{ kept: false, reason: 'authentication_required' }, /could not confirm .* \(authentication_required\)\. Check with get_script_decisions/],

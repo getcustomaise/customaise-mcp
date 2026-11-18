@@ -55,7 +55,7 @@ const USAGE = `customaise ${PKG_VERSION}: drive the Customaise extension from a 
   customaise scripts rm <id>              delete a script
   customaise sync <dir>                   bulk-export your scripts to a directory
   customaise decisions [id]               Script Decisions: agent access, keys, script states
-  customaise decisions set <id> <jev|openai-decisions|off> [--sets HASH,HASH]
+  customaise decisions set <id> <jev|openai-decisions|gemini-decisions|off> [--sets HASH,HASH]
                                           choose a script's provider; off is always allowed
   customaise tabs                         open browser tabs
   customaise tab open <url> | focus <id>   close and reload take an optional id
@@ -108,7 +108,7 @@ const COMMANDS: ReadonlyArray<{ command: string; description: string; tool?: str
   { command: 'scripts rm <id>', description: 'delete a script', tool: 'delete_script' },
   { command: 'sync <dir>', description: 'bulk-export your scripts to a directory', tool: 'sync_scripts' },
   { command: 'decisions [id]', description: 'Script Decisions on this device: agent access, saved keys, each script provider and state; with an id, its question lists and hashes', tool: 'get_script_decisions' },
-  { command: 'decisions set <id> <jev|openai-decisions|off>', description: 'choose a script provider and the question lists to switch on; needs Script Decisions turned on for agents by the person, except off', tool: 'set_script_decisions', flags: ['--sets HASH,HASH'] },
+  { command: 'decisions set <id> <jev|openai-decisions|gemini-decisions|off>', description: 'choose a script provider and the question lists to switch on; needs Script Decisions turned on for agents by the person, except off', tool: 'set_script_decisions', flags: ['--sets HASH,HASH'] },
   { command: 'tabs', description: 'open browser tabs', tool: 'list_tabs' },
   { command: 'tab list', description: 'open browser tabs (same as tabs)', tool: 'list_tabs' },
   { command: 'tab open <url>', description: 'open a tab', tool: 'open_tab' },
@@ -339,12 +339,12 @@ async function main(): Promise<void> {
   let decisionsSets: string[] | undefined;
   if (verb === 'decisions' && sub === 'set') {
     const provider = positional[3];
-    if (!third || !provider) fail(EXIT.USAGE, 'customaise decisions set <id> <jev|openai-decisions|off> [--sets HASH,HASH]');
-    if (!['jev', 'openai-decisions', 'off'].includes(provider)) {
-      fail(EXIT.USAGE, 'provider must be jev, openai-decisions or off, got "' + provider + '"');
+    if (!third || !provider) fail(EXIT.USAGE, 'customaise decisions set <id> <jev|openai-decisions|gemini-decisions|off> [--sets HASH,HASH]');
+    if (!['jev', 'openai-decisions', 'gemini-decisions', 'off'].includes(provider)) {
+      fail(EXIT.USAGE, 'provider must be jev, openai-decisions, gemini-decisions or off, got "' + provider + '"');
     }
     if (flags.sets !== undefined) {
-      if (provider === 'off') fail(EXIT.USAGE, '--sets only goes with jev or openai-decisions; off switches the script provider off');
+      if (provider === 'off') fail(EXIT.USAGE, '--sets only goes with a provider; off switches the script provider off');
       decisionsSets = String(flags.sets).split(',').map((hash) => hash.trim()).filter(Boolean);
       const bad = decisionsSets.find((hash) => !/^[a-f0-9]{64}$/.test(hash));
       if (bad !== undefined) {
