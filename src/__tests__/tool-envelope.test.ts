@@ -10,7 +10,7 @@
 import { describe, it, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { currentRequestContext } from '../request-context.js';
-import { toStructuredError, installToolEnvelope, ERROR_TYPES } from '../tool-envelope.js';
+import { toStructuredError, installToolEnvelope, withInboxNotice, INBOX_NOTICE_KEY, ERROR_TYPES } from '../tool-envelope.js';
 import {
   ERROR_CODE_AUTH_REQUIRED,
   ERROR_CODE_CAP_EXCEEDED,
@@ -125,5 +125,43 @@ describe('installToolEnvelope', () => {
     await s._registered[0].handler({}, { mcpReq: { _meta: { progressToken: 'token' }, notify: (frame: any) => frames.push(frame) } });
     assert.match(frames[0].params.message, /monaco_document_setup/);
     assert.doesNotMatch(frames[0].params.message, /user to approve/);
+  });
+});
+
+describe('the inbox notice', () => {
+  const result = () => ({ structuredContent: { result: [1, 2] }, content: [{ type: 'text', text: '[1,2]' }] });
+
+  it('says in both halves that hand-overs are waiting, and leaves the tool\'s own JSON first', () => {
+    const noted = withInboxNotice(result(), () => 2) as any;
+    assert.deepEqual(noted.structuredContent.result, [1, 2]);
+    assert.equal(noted.structuredContent[INBOX_NOTICE_KEY].waiting, 2);
+    assert.equal(noted.content[0].text, '[1,2]');
+    assert.match(noted.content[1].text, /2 hand-overs from a script's remote are waiting for an agent/);
+    // Every agent on the browser reads it: it says whose it is to take, and how to look without taking.
+    assert.match(noted.content[1].text, /If you gave the user a remote's link, take yours/);
+    assert.match(noted.content[1].text, /list_handovers \(customaise inbox\) shows what is waiting and takes nothing/);
+    assert.match(noted.content[1].text, /If none is from a remote you sent, leave it/);
+    assert.match(noted.content[1].text, /wait_for_handover/);
+  });
+
+  it('adds nothing when the inbox is empty, the count is unknown, or reading it throws', () => {
+    assert.deepEqual(withInboxNotice(result(), () => 0), result());
+    assert.deepEqual(withInboxNotice(result(), undefined), result());
+    assert.deepEqual(withInboxNotice(result(), () => { throw new Error('gone'); }), result());
+  });
+
+  it('leaves a failure as it is', () => {
+    const failed = toStructuredError(new Error('boom'));
+    assert.deepEqual(withInboxNotice(failed, () => 3), failed);
+  });
+
+  it('rides on every tool but the one that lists the inbox', async () => {
+    const handlers: Record<string, Function> = {};
+    const server = { registerTool: (name: string, _config: unknown, handler: Function) => { handlers[name] = handler; } };
+    installToolEnvelope(server, { inboxWaiting: () => 1 });
+    server.registerTool('list_tabs', {}, async () => result());
+    server.registerTool('list_handovers', {}, async () => result());
+    assert.equal((await handlers.list_tabs({}, {})).content.length, 2);
+    assert.equal((await handlers.list_handovers({}, {})).content.length, 1);
   });
 });

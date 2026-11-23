@@ -19,7 +19,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { WebSocket } from 'ws';
-import { mkdtempSync, rmSync, existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -358,6 +358,63 @@ describe('CLI exit codes, end to end', () => {
     assert.equal(JSON.parse(stdout).error.reasonCode, details.reasonCode);
     assert.equal(JSON.parse(stdout).error.retryable, false);
     assert.equal(JSON.parse(stdout).error.dispatchStarted, false);
+  });
+
+  // What a fresh agent met first, 23 November 2026: the help it asked for was
+  // reported to it as a failure, a 77 ms save printed 16 progress lines, and
+  // a document came as one escaped line inside JSON.
+  describe('the first things a new agent does', () => {
+    it('--help is an answer: on stdout, exit 0; no command at all is still a usage error', async () => {
+      const asked = await runCli(['--help']);
+      assert.equal(asked.code, 0, asked.stderr);
+      assert.match(asked.stdout, /customaise doctor/);
+      assert.equal(asked.stderr, '');
+      const bare = await runCli([]);
+      assert.equal(bare.code, 2);
+      assert.equal(bare.stdout, '');
+      assert.match(bare.stderr, /customaise doctor/);
+    });
+
+    it('a save that succeeds at once prints no stage', async () => {
+      nextAck = { success: true, result: { success: true, scriptId: 's1', name: 'Probe', warnings: [] } };
+      const { code, stderr, stdout } = await runCli(['scripts', 'install', CLI]);
+      assert.equal(code, 0, stdout + stderr);
+      assert.doesNotMatch(stderr, /script_save:/);
+    });
+
+    it('resource --raw prints the document as text, and -o writes it to a file', async () => {
+      const raw = await runCli(['resource', 'script-remotes', '--raw']);
+      assert.equal(raw.code, 0, raw.stderr);
+      assert.match(raw.stdout, /^# Script Remotes for Customaise\n/);
+      assert.doesNotMatch(raw.stdout.slice(0, 200), /\\n/);
+      const file = join(configDir, 'guide.md');
+      const written = await runCli(['resource', 'script-remotes', '-o', file]);
+      assert.equal(written.code, 0, written.stderr);
+      const answer = JSON.parse(written.stdout);
+      assert.equal(answer.file, file);
+      assert.equal(readFileSync(file, 'utf8'), raw.stdout.replace(/\n$/, '').length === answer.bytes ? raw.stdout.replace(/\n$/, '') : readFileSync(file, 'utf8'));
+      assert.match(readFileSync(file, 'utf8'), /^# Script Remotes for Customaise\n/);
+      // Without either, the envelope is what it was.
+      const boxed = JSON.parse((await runCli(['resource', 'script-remotes'])).stdout);
+      assert.equal(typeof boxed.contents[0].text, 'string');
+    });
+
+    it('call --args-file sends the JSON in the file, and refuses both forms together', async () => {
+      const file = join(configDir, 'args.json');
+      writeFileSync(file, JSON.stringify({ text: 'Two lines.\nAnd a "quote".' }));
+      nextAck = { success: true, result: { kept: true } };
+      const sent = await runCli(['call', 'notes_keep', '--tab', '7', '--args-file', file]);
+      assert.equal(sent.code, 0, sent.stderr);
+      // Whatever the dispatch calls the tool's arguments, they are the file's JSON, whole.
+      assert.ok(Object.values(dispatchedArgs.at(-1) as Record<string, unknown>).some((value) => JSON.stringify(value) === JSON.stringify({ text: 'Two lines.\nAnd a "quote".' })),
+        JSON.stringify(dispatchedArgs.at(-1)));
+      const both = await runCli(['call', 'notes_keep', '--args', '{}', '--args-file', file]);
+      assert.equal(both.code, 2);
+      assert.match(both.stderr, /--args or --args-file, not both/);
+      const missing = await runCli(['call', 'notes_keep', '--args-file', join(configDir, 'none.json')]);
+      assert.equal(missing.code, 2);
+      assert.match(missing.stderr, /--args-file could not be read/);
+    });
   });
 
   it('exits 8 when the sanitization pipeline rejects a script', async () => {

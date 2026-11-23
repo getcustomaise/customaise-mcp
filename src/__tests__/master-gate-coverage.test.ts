@@ -78,6 +78,15 @@ const UNGATED = new Set([
     // provider answers happen later, when a script runs.
     'get_script_decisions',
     'set_script_decisions',
+    // The inbox holds what a person already handed over; it reads the same
+    // with the toggle off. An empty inbox is an empty inbox.
+    'list_handovers',
+    'wait_for_handover',
+    'finish_handover',
+    // The pages a script opened are kept whether or not scripts may run:
+    // listing them and ending one work the same with the toggle off.
+    'list_remotes',
+    'end_remote',
 ]);
 
 /** Each registered tool, with whether its handler calls `withGate`. */

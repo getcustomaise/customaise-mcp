@@ -917,7 +917,10 @@ export class ExtensionBridge implements Bridge {
     const changed = !before
       || before.userScriptsDisabled !== next.userScriptsDisabled
       || before.userScriptsApiAvailable !== next.userScriptsApiAvailable
-      || before.configureWorldApiAvailable !== next.configureWorldApiAvailable;
+      || before.configureWorldApiAvailable !== next.configureWorldApiAvailable
+      // A follower's envelope reads this to tell its agent something is
+      // waiting, so followers hear when it changes.
+      || (before.inboxWaiting ?? 0) !== (next.inboxWaiting ?? 0);
     this.systemStatus = next;
     if (changed) this._broadcastStatusToFollowers(this.isConnected);
   }

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {
   SCRIPT_DECISIONS_CONVENTIONS,
+  SCRIPT_DECISIONS_AGENT_EXAMPLE,
   SCRIPT_DECISIONS_EXAMPLE,
   SCRIPT_DECISIONS_QUESTIONS,
 } from '../script-decisions-guide.js';
@@ -94,7 +95,7 @@ it('access and loop-guard errors stop the example with the sentence they carry, 
 
 it('the guide teaches the agent tools, the grant behind them and what stays with the person', () => {
   const guide = SCRIPT_DECISIONS_CONVENTIONS;
-  assert.match(guide, /^Release reference: extension 1\.5\.0 and MCP\/CLI 3\.4\.0\./m);
+  assert.match(guide, /^Needs extension 1\.5\.0 and MCP\/CLI 3\.4\.0, or later\./m);
   assert.match(guide, /^## Agents and Script Decisions$/m);
   assert.match(guide, /Only the person turns it on, through a protected confirmation in\s+the extension; no MCP tool or CLI command can/);
   assert.match(guide, /get_script_decisions, or customaise decisions \[id\]/);
@@ -120,4 +121,67 @@ it('no surface an agent reads still says MCP or the CLI cannot choose a provider
     assert.doesNotMatch(text, /—/, name);
   }
   assert.match(SERVER_INSTRUCTIONS, /No tool can turn that on, and keys, device access, daily limits, the device pause, runaway-loop pauses and shared scripts stay with the person/);
+});
+
+// A fresh agent given only these documents (23 November 2026) found one
+// complete example, a UserScript, and had to assemble the AgentScript case
+// from two documents. The guide now ships one, and this runs it.
+async function runAgentExample(createMany: (request: Record<string, unknown>, options: unknown) => Promise<unknown>) {
+  const tools: Array<{ name: string; execute: (args: unknown) => Promise<Record<string, unknown>> }> = [];
+  const context = vm.createContext({ document: { modelContext: { registerTool: (tool: never) => { tools.push(tool); } } }, CM_decisions: { createMany } });
+  vm.runInContext(SCRIPT_DECISIONS_AGENT_EXAMPLE, context);
+  assert.deepEqual(tools.map((tool) => tool.name), ['msg_triage']);
+  return tools[0].execute;
+}
+
+it('the guide carries a whole AgentScript that judges a list in one call', async () => {
+  assert.match(SCRIPT_DECISIONS_CONVENTIONS, /^## Working AgentScript$/m);
+  assert.ok(SCRIPT_DECISIONS_CONVENTIONS.includes(SCRIPT_DECISIONS_AGENT_EXAMPLE));
+  assert.match(SCRIPT_DECISIONS_AGENT_EXAMPLE, /^\/\/ @grant CM_decisions$/m);
+  assert.match(SCRIPT_DECISIONS_AGENT_EXAMPLE, /^\/\/ @webmcp msg_triage prompt$/m);
+
+  const sent: Array<{ request: Record<string, unknown>; options: unknown }> = [];
+  const execute = await runAgentExample(async (request, options) => {
+    sent.push({ request: JSON.parse(JSON.stringify(request)), options: JSON.parse(JSON.stringify(options)) });
+    return [
+      { answers: [{ type: 'predicate', name: 'needs_reply', probability: 0.91 }, { type: 'choice', name: 'topic', choice: 'login', confidence: 0.8 }] },
+      { error: { code: 'pending' } },
+      { answers: [{ type: 'refusal', name: 'needs_reply' }] },
+      { error: { code: 'rate_limited' } },
+    ];
+  });
+  const result = JSON.parse(JSON.stringify(await execute({ messages: ['a?', 'b', 'a?', 'c', 'd', '  ', 7] })));
+  // Each text once, in one call, with a wait that ends inside an agent's 30 seconds.
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].request.inputs, ['a?', 'b', 'c', 'd']);
+  assert.deepEqual(sent[0].options, { waitMs: 20000 });
+  assert.deepEqual(result.rows, [
+    { text: 'a?', state: 'answered', probability: 0.91, topic: 'login' },
+    { text: 'b', state: 'pending', code: 'pending' },
+    // A refusal is not read as a "no", and a provider's failure is not an answer.
+    { text: 'c', state: 'not_answered', code: 'refused' },
+    { text: 'd', state: 'not_answered', code: 'rate_limited' },
+  ]);
+  assert.match(result.note, /Call again with the same messages/);
+  assert.equal(result.stopped, undefined);
+});
+
+it('that AgentScript says why when the whole call stops, and what was answered before it did', async () => {
+  const execute = await runAgentExample(async () => {
+    throw Object.assign(new Error('No provider is chosen for this script yet. Choose one in its Decisions menu.'), {
+      code: 'authorization_required', setup: ['Choose a provider.'], results: [null, null],
+    });
+  });
+  const result = JSON.parse(JSON.stringify(await execute({ messages: ['a', 'b'] })));
+  assert.deepEqual(result.stopped, { code: 'authorization_required', message: 'No provider is chosen for this script yet. Choose one in its Decisions menu.', setup: ['Choose a provider.'] });
+  assert.deepEqual(result.rows.map((row: { state: string }) => row.state), ['not_sent', 'not_sent']);
+  assert.deepEqual(JSON.parse(JSON.stringify(await execute({}))), { error: 'no_messages', message: 'Pass messages: a list of texts.' });
+});
+
+it('the guide says how an agent chooses a provider for a new script, and that the questions are paid for with every input', () => {
+  const guide = SCRIPT_DECISIONS_CONVENTIONS;
+  assert.match(guide, /one whose\s+key is saved \(keySaved\)/);
+  assert.match(guide, /no reload is needed for it,\s+only for changed code/);
+  assert.match(guide, /The questions are sent with every input, so their length is paid for once\s+per input/);
+  assert.match(guide, /a question list is a set \(sets,\s+hashes\), and a decision is a row/);
 });

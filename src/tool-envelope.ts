@@ -132,6 +132,13 @@ export function installToolEnvelope(
   server: { registerTool: (...args: any[]) => unknown },
   opts: {
     onClientInfo?: (info: unknown) => void;
+    /**
+     * How many hand-overs from a script's page are waiting for an agent, as
+     * the extension last reported it (it rides on every answer). While it is
+     * above zero every successful result says so, which is how an agent that
+     * is busy with something else learns the person has sent it something.
+     */
+    inboxWaiting?: () => number;
   } = {},
 ): void {
   const CLIENT_INFO_META_KEY = 'io.modelcontextprotocol/clientInfo';
@@ -170,9 +177,44 @@ export function installToolEnvelope(
       // call's abort signal and progress hook without every handler having
       // to pass them down.
       try {
-        return await withRequestContext({ signal: ctx?.mcpReq?.signal, onPending }, () => handler(args, ctx));
+        const result = await withRequestContext({ signal: ctx?.mcpReq?.signal, onPending }, () => handler(args, ctx));
+        return name === 'list_handovers' ? result : withInboxNotice(result, opts.inboxWaiting);
       } catch (err) {
         return toStructuredError(err);
       }
     });
+}
+
+/** The key the notice sits under in `structuredContent`. Ours, so a tool's own data never collides with it. */
+export const INBOX_NOTICE_KEY = 'customaiseInbox';
+
+/**
+ * Say on a successful result that hand-overs are waiting.
+ *
+ * In both halves, for the two readers: `structuredContent` for the command
+ * line, which lifts the field out and reports it beside the data, and a
+ * second text block for the model at the other end of an IDE session. A
+ * second block, never text put before the first: the first is the tool's
+ * JSON and must stay parseable.
+ */
+export function withInboxNotice<T>(result: T, inboxWaiting?: () => number): T {
+  let waiting = 0;
+  try { waiting = Number(inboxWaiting?.()) || 0; } catch { /* a notice must never fail a call */ }
+  const shaped = result as { isError?: unknown; structuredContent?: unknown; content?: unknown } | null;
+  if (waiting <= 0 || !shaped || typeof shaped !== 'object' || shaped.isError) return result;
+  const notice = { waiting, see: 'wait_for_handover (command line: customaise inbox wait)' };
+  const structured = shaped.structuredContent;
+  return {
+    ...shaped,
+    ...(structured && typeof structured === 'object' && !Array.isArray(structured)
+      ? { structuredContent: { ...structured, [INBOX_NOTICE_KEY]: notice } } : {}),
+    content: [
+      ...(Array.isArray(shaped.content) ? shaped.content : []),
+      // Every agent on this browser reads this, the one that sent the remote's
+      // link and any other. It said "the user has handed you 1 item ... call
+      // wait_for_handover to take it", which an agent doing unrelated work read
+      // as an order about someone else's hand-over (23 November 2026).
+      { type: 'text', text: `Customaise inbox: ${waiting === 1 ? '1 hand-over' : waiting + ' hand-overs'} from a script's remote ${waiting === 1 ? 'is' : 'are'} waiting for an agent. If you gave the user a remote's link, take yours with wait_for_handover and that remote's id (command line: customaise inbox wait --remote ID). list_handovers (customaise inbox) shows what is waiting and takes nothing. If none is from a remote you sent, leave it for the agent that did.` },
+    ],
+  } as T;
 }

@@ -129,6 +129,11 @@ export interface SystemStatusSnapshot {
   userScriptsApiAvailable: boolean;
   configureWorldApiAvailable: boolean;
   available: boolean;
+  /**
+   * How many hand-overs from a script's page no agent has taken yet. Absent
+   * from an extension built before the agent inbox existed.
+   */
+  inboxWaiting?: number;
 }
 
 export interface Bridge {

@@ -2,9 +2,9 @@
   "manifest_version": "0.3",
   "name": "Customaise",
   "display_name": "Customaise",
-  "version": "3.4.0",
+  "version": "3.6.0",
   "description": "The bridge between Claude Desktop and your Customaise Chrome extension. Claude reads live pages, calls custom WebMCP tools, writes UserScripts and AgentScripts, all in your signed-in browser session.",
-  "long_description": "Customaise is the layer between any site and any AI agent. It runs two kinds of small scripts in your browser. UserScripts reshape the pages you live in: the standard .user.js userscript format, plus an AI editor that writes them from a single sentence. AgentScripts go the other direction: they expose a site as custom WebMCP tools your agent can call. Build them yourself, install them from the community, or have Claude write them for you.\n\nThis bundle is the bridge between Claude Desktop and the Customaise Chrome extension. Once installed, Claude can call the custom WebMCP tools registered on your open tabs (through Customaise's human-in-the-loop consent gate), read live page DOM, take screenshots, capture console output, write or edit UserScripts and AgentScripts on your behalf, and, when you allow it, choose the Script Decisions provider a script uses: Jev, OpenAI Decisions API or Gemini Decisions API. Everything runs in the browser session where you're already signed in: no API keys, no service accounts, no separate OAuth. The same 21 tools work for Cursor, Claude Code, Codex, Antigravity, and Kiro through their own MCP configurations.\n\nYou need the Customaise Chrome extension installed and signed in. The extension is the full product; a Power User plan unlocks unlimited use of this MCP bridge.",
+  "long_description": "Customaise is the layer between any site and any AI agent. It runs two kinds of small scripts in your browser. UserScripts reshape the pages you live in: the standard .user.js userscript format, plus an AI editor that writes them from a single sentence. AgentScripts go the other direction: they expose a site as custom WebMCP tools your agent can call. Build them yourself, install them from the community, or have Claude write them for you.\n\nThis bundle is the bridge between Claude Desktop and the Customaise Chrome extension. Once installed, Claude can call the custom WebMCP tools registered on your open tabs (through Customaise's human-in-the-loop consent gate), read live page DOM, take screenshots, capture console output, write or edit UserScripts and AgentScripts on your behalf, and, when you allow it, choose the Script Decisions provider a script uses: Jev, OpenAI Decisions API or Gemini Decisions API. With Script Remotes, a script can make a remote for your phone that works your signed-in tab, and Claude picks up what you hand over from it. Everything runs in the browser session where you're already signed in: no API keys, no service accounts, no separate OAuth. The same 26 tools work for Cursor, Claude Code, Codex, Antigravity, and Kiro through their own MCP configurations.\n\nYou need the Customaise Chrome extension installed and signed in. The extension is the full product; a Power User plan unlocks unlimited use of this MCP bridge.",
   "author": {
     "name": "CNDLE Studio LTD",
     "url": "https://customaise.com"
@@ -124,6 +124,26 @@
     {
       "name": "set_script_decisions",
       "description": "Choose a script's Script Decisions provider, or switch it off."
+    },
+    {
+      "name": "list_handovers",
+      "description": "List what you handed to your agent from a script's remote."
+    },
+    {
+      "name": "wait_for_handover",
+      "description": "Wait for you to hand something over from a script's remote, and take it."
+    },
+    {
+      "name": "finish_handover",
+      "description": "Mark a hand-over finished, so it is not offered again."
+    },
+    {
+      "name": "list_remotes",
+      "description": "List the remotes your scripts made for another device, each with its link."
+    },
+    {
+      "name": "end_remote",
+      "description": "End one remote, so its link stops working."
     }
   ],
   "server": {

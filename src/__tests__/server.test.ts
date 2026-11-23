@@ -104,6 +104,9 @@ const EXPECTED_TOOLS = [
   // Script Decisions for agents, under the person's grant (extension 1.4.0).
   'get_script_decisions',
   'set_script_decisions',
+  // The pages scripts opened for another device (extension 1.6.0).
+  'list_remotes',
+  'end_remote',
 ];
 
 const EXPECTED_PROMPTS: string[] = [];
@@ -115,6 +118,7 @@ const EXPECTED_RESOURCES = [
   'userscript-conventions',
   'agentscript-conventions',
   'script-decisions',
+  'script-remotes',
 ];
 
 describe('Server Tool Registration', () => {
@@ -139,16 +143,16 @@ describe('Server Tool Registration', () => {
 
   // ─── Registration Counts ────────────────────────────────────────
 
-  it('registers exactly 21 tools', () => {
-    assert.equal(server.registerTool.mock.callCount(), 21);
+  it('registers exactly 26 tools', () => {
+    assert.equal(server.registerTool.mock.callCount(), 26);
   });
 
   it('registers exactly 0 prompts', () => {
     assert.equal(server.registerPrompt.mock.callCount(), 0);
   });
 
-  it('registers five resources and one script-source template', () => {
-    assert.equal(server.registerResource.mock.callCount(), 6);
+  it('registers six resources and one script-source template', () => {
+    assert.equal(server.registerResource.mock.callCount(), 7);
   });
 
   // ─── Tool Names ─────────────────────────────────────────────────

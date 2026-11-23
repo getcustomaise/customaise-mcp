@@ -21,7 +21,9 @@
  */
 
 import { resolve as resolvePath } from 'node:path';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { EXIT, exitCodeForErrorType } from './exit-codes.js';
+import { INBOX_NOTICE_KEY } from '../tool-envelope.js';
 import { writeOut, writeErr } from './output.js';
 import { isRejection, rejectionMessage } from './rejection.js';
 import { buildPrimer, PRIMER_BEGIN, PRIMER_END } from './primer.js';
@@ -46,7 +48,8 @@ const USAGE = `customaise ${PKG_VERSION}: drive the Customaise extension from a 
   customaise doctor                       bridge, sign-in, tier, quota, gate
       --script ID [--operation ID]         inspect a save after a timeout
   customaise tools [--tab N]              WebMCP tools registered on a tab
-  customaise call <tool> [--args JSON]    invoke a WebMCP tool
+  customaise call <tool> [--args JSON | --args-file FILE]
+                                          invoke a WebMCP tool
   customaise scripts list                 installed scripts
   customaise scripts get <id> -o FILE     write a script to a local file
   customaise scripts install FILE [--id ID]  push a local file into Customaise
@@ -57,6 +60,16 @@ const USAGE = `customaise ${PKG_VERSION}: drive the Customaise extension from a 
   customaise decisions [id]               Script Decisions: agent access, keys, script states
   customaise decisions set <id> <jev|openai-decisions|gemini-decisions|off> [--sets HASH,HASH]
                                           choose a script's provider; off is always allowed
+  customaise inbox                        what the user handed you from a script's page
+  customaise inbox wait [--remote ID] [--as NAME] [--timeout SEC]
+                                          take the next hand-over the moment it arrives (default 300 s);
+                                          --remote: only from the remote you sent; --as: your name, shown to the user
+  customaise inbox done <id> [--failed "WHY"]
+                                          mark a hand-over finished; --failed when you could not do it,
+                                          with the reason in a few words for the user (their remote shows it)
+  customaise remotes [--script ID]        the remotes scripts made for another device, each with its link
+  customaise remotes end <id or link>     end one remote: its link stops working for good. Never to change
+                                          one: its script changes it in place and the link stays
   customaise tabs                         open browser tabs
   customaise tab open <url> | focus <id>   close and reload take an optional id
   customaise tab list | shot -o FILE | use --tab N
@@ -68,7 +81,9 @@ const USAGE = `customaise ${PKG_VERSION}: drive the Customaise extension from a 
   customaise daemon <status|stop>         inspect or stop the resident daemon
   customaise init [-o FILE]               write an agent primer (default AGENTS.md)
   customaise resources                    documents the server publishes
-  customaise resource <name|uri>          read one, e.g. agentscript-conventions
+  customaise resource <name|uri> [--raw | -o FILE]
+                                          read one, e.g. agentscript-conventions; --raw prints its
+                                          text as it is, -o writes it to a file
   customaise schema                       the command tree as JSON, for agents
 
 Typical loop:
@@ -98,7 +113,7 @@ diagnostics).`;
 const COMMANDS: ReadonlyArray<{ command: string; description: string; tool?: string; flags?: string[] }> = [
   { command: 'doctor', description: 'bridge, sign-in, tier, quota, gate; costs no quota', tool: 'get_bridge_status', flags: ['--script ID', '--operation ID'] },
   { command: 'tools', description: 'WebMCP tools registered on a tab', tool: 'list_webmcp_tools', flags: ['--tab N'] },
-  { command: 'call <tool>', description: 'invoke a WebMCP tool; may wait for the user to approve', tool: 'call_webmcp_tool', flags: ['--args JSON', '--tab N'] },
+  { command: 'call <tool>', description: 'invoke a WebMCP tool; may wait for the user to approve', tool: 'call_webmcp_tool', flags: ['--args JSON', '--args-file FILE', '--tab N'] },
   { command: 'scripts list', description: 'installed scripts', tool: 'list_scripts' },
   { command: 'scripts get <id>', description: 'write a script to a local file', tool: 'import_script', flags: ['-o FILE'] },
   { command: 'scripts install FILE', description: 'push a local file into Customaise', tool: 'export_script', flags: ['--id ID'] },
@@ -109,6 +124,11 @@ const COMMANDS: ReadonlyArray<{ command: string; description: string; tool?: str
   { command: 'sync <dir>', description: 'bulk-export your scripts to a directory', tool: 'sync_scripts' },
   { command: 'decisions [id]', description: 'Script Decisions on this device: agent access, saved keys, each script provider and state; with an id, its question lists and hashes', tool: 'get_script_decisions' },
   { command: 'decisions set <id> <jev|openai-decisions|gemini-decisions|off>', description: 'choose a script provider and the question lists to switch on; needs Script Decisions turned on for agents by the person, except off', tool: 'set_script_decisions', flags: ['--sets HASH,HASH'] },
+  { command: 'inbox', description: 'what the user handed you from a script remote; takes nothing', tool: 'list_handovers' },
+  { command: 'inbox wait', description: 'take the next hand-over the moment it arrives; run it right after giving the user a remote link; answers waiting: true at the timeout', tool: 'wait_for_handover', flags: ['--remote ID', '--as NAME', '--timeout SEC'] },
+  { command: 'inbox done <id>', description: 'mark a hand-over finished, so it is not offered again; --failed "why" when you could not do it, shown to the user on their remote', tool: 'finish_handover', flags: ['--failed WHY'] },
+  { command: 'remotes', description: 'Script Remotes: the remotes scripts made for another device, each with its link', tool: 'list_remotes', flags: ['--script ID'] },
+  { command: 'remotes end <id>', description: 'end one remote: its link stops working for good; never to change one, which its script does in place', tool: 'end_remote' },
   { command: 'tabs', description: 'open browser tabs', tool: 'list_tabs' },
   { command: 'tab list', description: 'open browser tabs (same as tabs)', tool: 'list_tabs' },
   { command: 'tab open <url>', description: 'open a tab', tool: 'open_tab' },
@@ -126,7 +146,7 @@ const COMMANDS: ReadonlyArray<{ command: string; description: string; tool?: str
   { command: 'daemon stop', description: 'stop the resident daemon' },
   { command: 'init', description: 'write an agent primer (default AGENTS.md)', flags: ['-o FILE'] },
   { command: 'resources', description: 'documents the server publishes, including how to build scripts' },
-  { command: 'resource', description: 'read one resource by name or customaise:// uri' },
+  { command: 'resource', description: 'read one resource by name or customaise:// uri; --raw prints its text as it is, -o FILE writes it to a file', flags: ['--raw', '-o FILE'] },
   { command: 'schema', description: 'this command tree as JSON' },
   { command: 'version', description: 'print the version' },
 ];
@@ -140,7 +160,10 @@ interface Flags { [k: string]: string | boolean }
  * there and exited 0 reporting success. Rejecting here rather than at each
  * call site keeps the next value-taking flag from reintroducing it.
  */
-const VALUE_FLAGS = new Set(['tab', 'out', 'args', 'id', 'script', 'operation', 'sets']);
+/** How long a save runs before its stages are printed. */
+const SAVE_PROGRESS_AFTER_MS = 3_000;
+
+const VALUE_FLAGS = new Set(['tab', 'out', 'args', 'args-file', 'id', 'script', 'operation', 'sets', 'timeout', 'remote', 'as', 'failed']);
 
 function parseFlags(argv: string[]): { positional: string[]; flags: Flags } {
   const positional: string[] = [];
@@ -187,6 +210,16 @@ function tabOf(flags: Flags): number | undefined {
 }
 
 function parseArgs(flags: Flags): Record<string, unknown> {
+  // Long text (an explanation, a rewritten draft) is awkward to quote on a
+  // command line: --args-file reads the same JSON from a file.
+  if (flags['args-file'] !== undefined) {
+    if (flags.args !== undefined) fail(EXIT.USAGE, 'Pass --args or --args-file, not both.');
+    let text: string;
+    try { text = readFileSync(resolvePath(String(flags['args-file'])), 'utf8'); }
+    catch (e: any) { return fail(EXIT.USAGE, '--args-file could not be read: ' + e.message); }
+    try { return JSON.parse(text); }
+    catch (e: any) { return fail(EXIT.USAGE, '--args-file is not valid JSON: ' + e.message); }
+  }
   if (flags.args === undefined) return {};
   try { return JSON.parse(String(flags.args)); }
   catch (e: any) { return fail(EXIT.USAGE, '--args is not valid JSON: ' + e.message); }
@@ -210,6 +243,16 @@ function present(result: any, passthrough = false): never {
   }
   const text = result?.content?.[0]?.text;
   let data: unknown = structured;
+  // The server's notice that hand-overs are waiting. Lifted out before
+  // anything reads the data, so `customaise tabs` stays a list, and said on
+  // stderr too for an agent that reads only what a command prints there.
+  let inbox: unknown;
+  if (data && typeof data === 'object' && !Array.isArray(data) && INBOX_NOTICE_KEY in (data as Record<string, unknown>)) {
+    const { [INBOX_NOTICE_KEY]: notice, ...rest } = data as Record<string, unknown>;
+    inbox = notice;
+    data = rest;
+    writeErr('customaise: a hand-over from a script\'s remote is waiting for an agent. If you sent that remote\'s link, take it with `customaise inbox wait --remote ID`; `customaise inbox` shows what is waiting and takes nothing. If it is not yours, leave it.\n');
+  }
   // The server wraps a non-object result as `{ result }` so the shape does
   // not change with the negotiated protocol era. Unwrap it, so
   // `customaise tabs` yields a list rather than a list inside a box.
@@ -240,7 +283,7 @@ function present(result: any, passthrough = false): never {
     process.exit(EXIT.REJECTED);
   }
 
-  emit({ ok: true, data });
+  emit({ ok: true, data, ...(inbox === undefined ? {} : { inbox }) });
   process.exit(EXIT.OK);
 }
 
@@ -280,7 +323,12 @@ async function main(): Promise<void> {
   const { positional, flags } = parseFlags(argv);
 
   if (flags.version || positional[0] === 'version') { writeOut(PKG_VERSION + '\n'); process.exit(EXIT.OK); }
-  if (flags.help || positional.length === 0) { writeErr(USAGE + '\n'); process.exit(positional.length ? EXIT.OK : EXIT.USAGE); }
+  // Asked for, the help is the answer: stdout, exit 0. Until 23 November 2026
+  // `customaise --help` went to stderr and exited 2, so the first command a
+  // new agent runs was reported to it as a failure. With no command at all it
+  // is still a usage error, on stderr.
+  if (flags.help) { writeOut(USAGE + '\n'); process.exit(EXIT.OK); }
+  if (positional.length === 0) { writeErr(USAGE + '\n'); process.exit(EXIT.USAGE); }
 
   installCrashGuard(fail);
 
@@ -336,6 +384,13 @@ async function main(): Promise<void> {
   // Checked before any connect, like doctor's flags, so a malformed call
   // exits 2 without reaching the extension. `--sets ''` is an empty list:
   // keep the provider with every question list Off, as MCP's `sets: []` does.
+  let inboxTimeout = 300;
+  if (verb === 'inbox' && flags.timeout !== undefined) {
+    inboxTimeout = Number(flags.timeout);
+    if (!Number.isFinite(inboxTimeout) || inboxTimeout < 1 || inboxTimeout > 3600) {
+      fail(EXIT.USAGE, '--timeout takes seconds, 1 to 3600, got "' + flags.timeout + '"');
+    }
+  }
   let decisionsSets: string[] | undefined;
   if (verb === 'decisions' && sub === 'set') {
     const provider = positional[3];
@@ -429,13 +484,40 @@ async function main(): Promise<void> {
 
   const { client, record } = await connectToDaemon(fail);
 
-  const callTool = async (name: string, args: Record<string, unknown>) =>
-    client.callTool({ name, arguments: args }, name === 'export_script' ? {
-      // The save has a 90-second absolute deadline; leave room for its final
-      // status to arrive instead of abandoning it at the SDK's 60s default.
-      timeout: 95_000,
-      onprogress: progress => { if (progress.message) writeErr('customaise: ' + progress.message + '\n'); },
-    } : undefined);
+  const started = Date.now();
+  // A save reports each stage it reaches, which keeps a long save alive.
+  // Printing every one put 16 lines of "save deadline in up to 92s" above the
+  // result of a save that took 77 ms. So a stage is said once a save has
+  // taken a while, and the last one reached is said when the save fails,
+  // because that is where it failed.
+  let lastStage: string | null = null;
+  const sayStage = (message: string) => writeErr('customaise: ' + message + '\n');
+  const callTool = async (name: string, args: Record<string, unknown>) => {
+    if (name !== 'export_script') {
+      // One wait is at most 50 seconds on the server; leave room for its answer.
+      return client.callTool({ name, arguments: args }, name === 'wait_for_handover' ? { timeout: 70_000 } : undefined);
+    }
+    const quiet = () => Date.now() - started <= SAVE_PROGRESS_AFTER_MS;
+    try {
+      const result = await client.callTool({ name, arguments: args }, {
+        // The save has a 90-second absolute deadline; leave room for its final
+        // status to arrive instead of abandoning it at the SDK's 60s default.
+        timeout: 95_000,
+        onprogress: progress => {
+          if (!progress.message) return;
+          if (quiet()) lastStage = progress.message; else { lastStage = null; sayStage(progress.message); }
+        },
+      });
+      // A script the pipeline refused comes back as an ordinary result that says so.
+      const refused = result.isError || isRejection(result.structuredContent)
+        || isRejection((result.structuredContent as { result?: unknown } | undefined)?.result);
+      if (refused && lastStage) sayStage(lastStage);
+      return result;
+    } catch (error) {
+      if (lastStage) sayStage(lastStage);
+      throw error;
+    }
+  };
 
   /**
    * `customaise call`, which is the one command that can legitimately block
@@ -558,7 +640,7 @@ async function main(): Promise<void> {
     }
     case 'tools':   return present(await callTool('list_webmcp_tools', { tabId: tabOf(flags) }));
     case 'call': {
-      if (!sub) fail(EXIT.USAGE, 'customaise call <tool> [--args JSON] [--tab N]');
+      if (!sub) fail(EXIT.USAGE, 'customaise call <tool> [--args JSON | --args-file FILE] [--tab N]');
       return present(noteConsent(await callToolWithConsentBudget('call_webmcp_tool', { toolName: sub, toolArgs: parseArgs(flags), tabId: tabOf(flags), ...outputFromEnv() })), true);
     }
     /*
@@ -587,6 +669,16 @@ async function main(): Promise<void> {
         fail(EXIT.USAGE,
           `No resource ${uri}. Run \`customaise resources\` to list them.`);
       }
+      // A document is prose with line breaks. Inside the JSON envelope it is
+      // one escaped line, which an agent has to unwrap before it can read it:
+      // --raw prints the text as it is, and -o FILE writes it there.
+      const text = (read.contents as Array<{ text?: unknown }>).map((part) => (typeof part.text === 'string' ? part.text : '')).join('\n');
+      if (flags.out) {
+        const file = abs(flags.out);
+        writeFileSync(file, text);
+        return emit({ ok: true, uri, file, bytes: Buffer.byteLength(text) });
+      }
+      if (flags.raw) { writeOut(text.endsWith('\n') ? text : text + '\n'); return; }
       return emit({ ok: true, uri, contents: read.contents });
     }
     case 'tabs':    return present(await callTool('list_tabs', {}));
@@ -673,6 +765,37 @@ async function main(): Promise<void> {
         }));
       }
       return present(await callTool('get_script_decisions', { ...(sub === undefined ? {} : { scriptId: sub }) }));
+    }
+    case 'remotes': {
+      if (sub === undefined) return present(await callTool('list_remotes', { ...(flags.script === undefined ? {} : { scriptId: String(flags.script) }) }));
+      if (sub === 'end') {
+        if (!third) fail(EXIT.USAGE, 'customaise remotes end <id or link>');
+        return present(await callTool('end_remote', { remote: third }));
+      }
+      fail(EXIT.USAGE, 'customaise remotes [--script ID] | customaise remotes end <id or link>');
+    }
+    case 'inbox': {
+      if (sub === undefined) return present(await callTool('list_handovers', {}));
+      if (sub === 'done') {
+        if (!third) fail(EXIT.USAGE, 'customaise inbox done <id> [--failed "WHY"]');
+        // --failed: you could not do what was handed over. The reason is shown to the user on their page.
+        return present(await callTool('finish_handover', { id: third, ...(flags.failed === undefined ? {} : { failed: String(flags.failed) }) }));
+      }
+      if (sub === 'wait') {
+        // One server call waits at most 50 seconds, because some clients cap
+        // a tool call at 60; this repeats it until the timeout the caller set.
+        const until = Date.now() + inboxTimeout * 1000;
+        for (;;) {
+          const left = Math.ceil((until - Date.now()) / 1000);
+          const result: any = await callTool('wait_for_handover', {
+            seconds: Math.max(1, Math.min(50, left)),
+            ...(flags.remote === undefined ? {} : { remote: String(flags.remote) }),
+            ...(flags.as === undefined ? {} : { as: String(flags.as) }),
+          });
+          if (result?.isError || result?.structuredContent?.item || until - Date.now() < 1000) return present(result);
+        }
+      }
+      return fail(EXIT.USAGE, 'customaise inbox [wait [--remote ID] [--as NAME] [--timeout SEC] | done <id>]');
     }
     case 'context': {
       const output = outputFromEnv();

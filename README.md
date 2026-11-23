@@ -2,7 +2,7 @@
 
 MCP server and CLI that connect AI coding agents to the [Customaise](https://customaise.com) Chrome extension. Manage UserScripts, build AgentScripts, call WebMCP tools inside the user's signed-in browser session, select DOM elements visually, and drive tabs. Drive it over stdio from an IDE, or as a `customaise` command from a shell.
 
-**21 tools, 5 resources plus a script resource template, WebSocket bridge** between your agent and a real Chrome session, whichever door it arrives through.
+**26 tools, 6 resources plus a script resource template, WebSocket bridge** between your agent and a real Chrome session, whichever door it arrives through.
 
 Two ways in. `customaise-mcp` is the MCP server an IDE spawns over stdio.
 `customaise` is a CLI for agents that have a shell instead, driving the same
@@ -89,7 +89,7 @@ args = ["-y", "@customaise/mcp"]
 ### 3. Done
 Your agent can now read and edit UserScripts, build AgentScripts that expose WebMCP tools to it, select DOM elements visually, inspect the console, and take screenshots of the live tab.
 
-## Tools (21)
+## Tools (26)
 
 ### Script Lifecycle
 | Tool | Description |
@@ -139,14 +139,27 @@ Your agent can now read and edit UserScripts, build AgentScripts that expose Web
 | `get_script_decisions` | Read Script Decisions on this device: whether agents may manage it, saved provider keys, and each script's provider and state; with a script ID, its question lists and their hashes |
 | `set_script_decisions` | Choose a script's provider (Jev, OpenAI Decisions API or Gemini Decisions API) and which question lists are On, or switch it off. Needs the person to turn on Script Decisions under Full access, except off |
 
+### Agent inbox
+| Tool | Description |
+|------|-------------|
+| `list_handovers` | List what the user has handed to the agent from a script's remote. Takes nothing |
+| `wait_for_handover` | Wait up to 50 seconds for the user to hand something over, and take it the moment it arrives |
+| `finish_handover` | Mark a hand-over finished, so it is not offered again; with `failed`, say why you could not do it, which the user's remote shows |
+
+### Script Remotes
+| Tool | Description |
+|------|-------------|
+| `list_remotes` | List the remotes scripts made for the user's other device, for every script or one, each with its link |
+| `end_remote` | End one remote: its link stops working for good. Never to change one, which its script does in place |
+
 ### Diagnostics
 | Tool | Description |
 |------|-------------|
 | `get_bridge_status` | Report extension attachment, plan tier, sign-in, remaining quota and the browser's agent permission mode, including whether agents may manage Script Decisions, when supported. Costs no quota itself. |
 
-## Resources (5 plus a template)
+## Resources (6 plus a template)
 
-Five resources and one script resource template that connected agents can read via `resources/read`. The two conventions handbooks define exactly how Customaise expects UserScripts and AgentScripts to be written. Agents should read the relevant handbook before touching a script.
+Six resources and one script resource template that connected agents can read via `resources/read`. The two conventions handbooks define exactly how Customaise expects UserScripts and AgentScripts to be written. Agents should read the relevant handbook before touching a script.
 
 | URI | Description |
 |-----|-------------|
@@ -156,6 +169,7 @@ Five resources and one script resource template that connected agents can read v
 | `customaise://userscript-conventions` | Full UserScript reference: file structure, IIFE pattern, `GM_*` APIs, symbol-level editing, `@match` and `@namespace` rules |
 | `customaise://agentscript-conventions` | Full AgentScript reference: the `// ==AgentScript==` block, `// @webmcp <tool> <permission>` declarations, `document.modelContext.registerTool()`, consent model |
 | `customaise://script-decisions` | Shared UserScript/AgentScript guide: the question format, the CM_decisions API, the three providers compared, working example, device/provider setup, billing and failure handling |
+| `customaise://script-remotes` | Script Remotes guide: an AgentScript whose own remote opens on the user's phone. The `CM_remote` API, `window.customaise` inside the remote, handing data to the agent, limits, errors and a complete working script |
 
 ## Script Decisions in UserScripts and AgentScripts
 
@@ -215,7 +229,7 @@ not, why. Without the grant the person chooses the provider again after the
 edit. Both tools need extension 1.4.0 or later; an older extension answers
 `extension_outdated`.
 
-## Updating to MCP/CLI 3.4.0 and extension 1.5.0
+## Updating to MCP/CLI 3.6.0 and extension 1.6.0
 
 The CLI and Desktop bundle ship the same tested runtime dependencies. Runtime
 dependencies are bundled in the npm tarball so fresh installs retain those
@@ -224,12 +238,25 @@ versions. Contributors should use `npm ci`; dependency updates belong in
 
 Update both the extension and the companion for the latest permission controls
 and status reporting. The npm package contains both `customaise-mcp`
-and the `customaise` CLI; Claude Desktop uses the matching 3.4.0 `.mcpb` bundle.
+and the `customaise` CLI; Claude Desktop uses the matching 3.6.0 `.mcpb` bundle.
 Restart all MCP clients and any running Customaise CLI daemon after updating.
-Relay protocol 2 is unchanged from 3.2.3, and the 21 tools and their approval
-rules from 3.2.9.
+Relay protocol 2 is unchanged from 3.2.3. The tool surface grows from 21 to 26
+with the agent inbox and the two remote tools; the other tools and their approval rules are unchanged
+from 3.2.9. There is no 3.5.0: its release candidates became 3.6.0.
 
-Extension 1.5.0 adds the Gemini Decisions API as a third Script Decisions
+Extension 1.6.0 adds Script Remotes. An AgentScript with
+`@grant CM_remote` opens a page it wrote on the user's phone, and that remote
+calls the script's tools in the signed-in tab on the computer. A remote is a
+lasting, named part of the script with one link: opening the same name again
+changes that remote where it is open. The remote can
+also hand data to the agent: take it with `wait_for_handover` or
+`customaise inbox wait`, and close it with `finish_handover` or
+`customaise inbox done`. Read `customaise://script-remotes`, or run
+`customaise resource script-remotes`, before writing one; it ends with a
+complete script. Script Remotes need Power User and extension 1.6.0; an
+older extension answers `extension_outdated` to the inbox tools.
+
+Extension 1.5.0 added the Gemini Decisions API as a third Script Decisions
 provider, beside Jev and the OpenAI Decisions API. The Script Decisions guide
 compares the three, shows Gemini's inputs (audio, video and PDF documents as
 well as text and images) and says what runs on which provider.
@@ -562,6 +589,11 @@ customaise scripts rm mcp_script_123
 customaise sync ./customaise-scripts          # bulk export your scripts
 customaise decisions                         # Script Decisions: agent access, keys, script states
 customaise decisions set mcp_script_123 jev  # needs Script Decisions on for agents; off always works
+customaise inbox wait --remote REMOTE_ID --as "Your Name"  # take what the user hands over from a remote
+customaise inbox done h_abc123               # after you acted on it; `customaise inbox` lists what waits
+customaise inbox done h_abc123 --failed "The tab is signed out"   # you could not do it: the user's remote shows why
+customaise remotes                           # the remotes scripts made for the user's other device, with their links
+customaise remotes end REMOTE_ID             # end one for good (never to change it: its script does that in place)
 customaise tabs
 customaise tab reload 42
 customaise use --tab 42                      # remember it for later commands
@@ -666,7 +698,7 @@ so a stream of replacements cannot create unbounded background work.
 ## Requirements
 
 - **Node.js** ≥ 20
-- **Chrome 147 or later** with Customaise (1.5.0 is the tested pair for 3.4.0), signed in, with **Agent Bridge** on.
+- **Chrome 147 or later** with Customaise (1.6.0 is the tested pair for 3.6.0), signed in, with **Agent Bridge** on.
 
 ## Plan tiers
 
