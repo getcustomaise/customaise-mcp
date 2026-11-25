@@ -97,6 +97,8 @@ const initSession: Record<string, unknown> = {
 
 const env = () => ({
   ...process.env,
+  // Run from an agent's shell or a plain terminal, the result is the same.
+  AI_AGENT: '', CLAUDECODE: '',
   CUSTOMAISE_HTTP_PORT: String(httpPort),
   CUSTOMAISE_WS_PORT: String(wsPort),
   CUSTOMAISE_CONFIG_DIR: configDir,
@@ -629,7 +631,11 @@ describe('CLI exit codes, end to end', () => {
       // Nothing will work, so exiting 0 would be a lie an agent plans against.
       const { code, stdout } = await runCli(['doctor']);
       assert.equal(code, 3, stdout);
+      assert.equal(JSON.parse(stdout).ok, false);
       assert.equal(JSON.parse(stdout).data.userScripts, 'DISABLED');
+      // The extension answered, so it is connected: the switch is the cause.
+      assert.equal(JSON.parse(stdout).data.extension, 'connected',
+        'doctor called a connected extension unreachable');
     });
 
     it('and says nothing once the gate is back on', async () => {

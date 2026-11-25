@@ -186,6 +186,11 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<void> {
     fetch: (request) => handler.fetch(request),
     activeWorkspaces,
     onActivity: () => { lastActivity = Date.now(); },
+    // Carry the name of the agent that drives this daemon, so the extension
+    // can say "Claude Code is connected" under the tile the person picked.
+    // The last agent to speak names it: two agents sharing one daemon is
+    // rare, and the name only changes when a different one calls.
+    onAgent: (agent) => bridge.setOwnClientInfo({ name: `customaise daemon (${agent})`, version: PKG_VERSION }),
   }));
   // Also bound connections that have not finished their HTTP headers yet.
   server.maxConnections = 64;

@@ -158,6 +158,19 @@ try {
     verifyPayload(dist);
     const npmDependencies = verifyDependencies(join(installDir, 'node_modules'));
     assert.equal(run(process.execPath, [join(installed, installedPkg.bin.customaise), '--version']).trim(), pkg.version);
+    // The documented start command, on the packed bytes: npx has to choose the
+    // server by itself. Every check above starts a program by its path, which
+    // is how 3.0.0 to 3.6.0 shipped a package `npx -y @customaise/mcp` could
+    // not start. An empty folder, so no installed copy answers for the archive,
+    // and a file: spec, because npx runs a bare absolute path as a command.
+    const npxDir = join(scratch, 'npx-run');
+    mkdirSync(npxDir);
+    const packed = `file:${archive}`;
+    const viaNpx = (...args) => run('npx', ['--yes', '--cache', join(scratch, 'npm-cache'), ...args], { cwd: npxDir });
+    assert.match(viaNpx(packed, '--help'), /MCP server for the Customaise Chrome extension/,
+      '`npx -y @customaise/mcp` must start the server, not ask which program to run');
+    assert.equal(viaNpx('-p', packed, 'customaise-mcp', '--version').trim(), pkg.version);
+    assert.equal(viaNpx('-p', packed, 'customaise', '--version').trim(), pkg.version);
     const npmResult = await verifyStdio(join(dist, 'index.js'), installDir, { CUSTOMAISE_MCP_OUTPUT: 'file' }, declaredTools);
     report.artifacts.push({ kind: 'npm', sha256: hash(archive), compiledFiles: compiled.length, dependencies: npmDependencies, cliVersion: pkg.version, ...npmResult });
   }

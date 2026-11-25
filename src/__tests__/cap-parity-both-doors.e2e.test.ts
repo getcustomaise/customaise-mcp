@@ -81,6 +81,8 @@ const seen: string[] = [];
 
 const env = () => ({
   ...process.env,
+  // Run from an agent's shell or a plain terminal, the result is the same.
+  AI_AGENT: '', CLAUDECODE: '',
   CUSTOMAISE_HTTP_PORT: String(httpPort),
   CUSTOMAISE_WS_PORT: String(wsPort),
   CUSTOMAISE_CONFIG_DIR: configDir,

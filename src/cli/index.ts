@@ -318,6 +318,9 @@ function handleUse(flags: Flags): never {
   process.exit(EXIT.OK);
 }
 
+/** How long `doctor` waits for the extension to find a daemon it has just started. */
+const FRESH_START_WAIT_MS = 8000;
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const { positional, flags } = parseFlags(argv);
@@ -482,7 +485,7 @@ async function main(): Promise<void> {
     process.exit(EXIT.OK);
   }
 
-  const { client, record } = await connectToDaemon(fail);
+  const { client, record, started: daemonJustStarted } = await connectToDaemon(fail);
 
   const started = Date.now();
   // A save reports each stage it reaches, which keeps a long save alive.
@@ -579,13 +582,31 @@ async function main(): Promise<void> {
       // NO cap unit. This used to call `list_tabs`, so working out why MCP
       // was failing cost one of the fifty daily calls that might be why it
       // was failing.
-      const r: any = await callTool('get_bridge_status', {
+      const statusArgs = {
         ...(flags.script ? { scriptId: String(flags.script) } : {}),
         ...(flags.operation ? { operationId: String(flags.operation) } : {}),
-      });
+      };
+      let r: any = await callTool('get_bridge_status', statusArgs);
+      // A daemon this command has just started is not found by the extension
+      // at once: it looks every 3 seconds while its connect card is open and
+      // every 30 otherwise. Answering "not connected" straight away sent an
+      // agent off to wait half a minute for a setup that was already working
+      // (24 November 2026), so a fresh start gives the extension a moment.
+      if (daemonJustStarted) {
+        const until = Date.now() + FRESH_START_WAIT_MS;
+        while (!r?.isError && r?.structuredContent?.extensionConnected === false && Date.now() < until) {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          r = await callTool('get_bridge_status', statusArgs);
+        }
+      }
       const s = r?.structuredContent ?? {};
       const gateOff = s.systemStatus?.userScriptsDisabled === true;
-      const reachable = !r?.isError && s.extensionConnected === true && !gateOff;
+      // Attached is not usable: with "Allow user scripts" off the extension
+      // answers and nothing runs. `extension` says which of the two it is,
+      // because "unreachable" beside a signed-in account and a plan tier sent
+      // an agent looking for a connection fault (24 November 2026).
+      const attached = !r?.isError && s.extensionConnected === true;
+      const reachable = attached && !gateOff;
 
       // `null` means the extension never told us, which is not the same as
       // `false`. Say so rather than inventing a confident answer.
@@ -618,7 +639,7 @@ async function main(): Promise<void> {
         // asking rather than with the process being asked about. Falls back to
         // this environment only for a record an older daemon wrote.
         extensionSocket: 'ws://127.0.0.1:' + (record.wsPort ?? (Number(process.env.CUSTOMAISE_WS_PORT) || 4050)),
-        extension: reachable
+        extension: attached
           ? 'connected'
           : (r?.structuredContent?.error?.type ?? (s.extensionConnected === false ? 'extension_not_connected' : 'unreachable')),
         signedIn: known(s.authenticated),

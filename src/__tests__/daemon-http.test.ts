@@ -1,9 +1,9 @@
-import { it, type TestContext } from 'node:test';
+import { describe, it, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createDaemonHttpHandler, WORKSPACE_HEADER, DAEMON_HTTP_LIMITS, workspaceHeaders, WORKSPACE_ENCODING_HEADER } from '../daemon-http.js';
+import { createDaemonHttpHandler, WORKSPACE_HEADER, DAEMON_HTTP_LIMITS, workspaceHeaders, WORKSPACE_ENCODING_HEADER, AGENT_HEADER, agentFromEnvironment, agentHeaders } from '../daemon-http.js';
 import { currentRequestContext } from '../request-context.js';
 import { getWorkspaceDir } from '../server.js';
 
@@ -240,4 +240,45 @@ it('releases an upload slot when a client disconnects before completing its body
   await delay(20);
   assert.equal(await (await call()).text(), 'ok');
   assert.equal(calls, 1);
+});
+
+describe('which agent is at the shell', () => {
+  it('reads the name Claude Code gives every program it runs', () => {
+    assert.equal(agentFromEnvironment({ AI_AGENT: 'claude-code_2-1-330_agent', CLAUDECODE: '1' }), 'claude-code');
+    assert.equal(agentFromEnvironment({ CLAUDECODE: '1' }), 'claude-code');
+    assert.deepEqual(agentHeaders({ AI_AGENT: 'claude-code_2-1-330_agent' }), { [AGENT_HEADER]: 'claude-code' });
+  });
+
+  it('takes the leading name of whatever another agent says', () => {
+    assert.equal(agentFromEnvironment({ AI_AGENT: 'Some-Agent/1.2' }), 'some-agent');
+    assert.equal(agentFromEnvironment({ AI_AGENT: 'codex@0.98' }), 'codex');
+  });
+
+  it('says nothing for a plain terminal or a name it cannot use', () => {
+    assert.equal(agentFromEnvironment({}), null);
+    assert.equal(agentFromEnvironment({ AI_AGENT: '', CLAUDECODE: '' }), null);
+    assert.equal(agentFromEnvironment({ AI_AGENT: '"; rm -rf' }), null);
+    assert.equal(agentFromEnvironment({ AI_AGENT: 'x'.repeat(80) }), null);
+    assert.deepEqual(agentHeaders({}), {});
+  });
+
+  it('the daemon hears a well-formed name and ignores anything else', async (t) => {
+    const heard: string[] = [];
+    const server = http.createServer(createDaemonHttpHandler({
+      authorize: () => true,
+      fetch: async () => new Response('{}'),
+      activeWorkspaces: new Map(),
+      onAgent: (name) => heard.push(name),
+    }));
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    t.after(async () => { server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); });
+    const url = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/mcp`;
+    const call = (agent?: string) => fetch(url, { method: 'POST', body: '{}', headers: { [WORKSPACE_HEADER]: '/caller', ...(agent === undefined ? {} : { [AGENT_HEADER]: agent }) } });
+    await call('claude-code');
+    await call('Not A Name');
+    await call('<script>');
+    await call();
+    assert.deepEqual(heard, ['claude-code']);
+  });
 });

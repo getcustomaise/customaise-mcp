@@ -61,7 +61,7 @@ Claude Desktop spawns this bundle as a local Node.js process. The bundle opens a
 
 ## Script Decisions reference
 
-This 3.6.0 bundle includes `customaise://script-decisions`, alongside the UserScript and AgentScript handbooks. It explains the questions written in the code, the CM_decisions API, a working example and bounded recovery. Pair with extension 1.6.0 (Script Decisions was introduced in 1.3.8, the Gemini Decisions API in 1.5.0). Script Decisions is a Power User capability. Saved keys and device authorisation belong to the person's account and extension controls. When the person turns on Script Decisions under Full access in Agent permissions, Claude can choose a script's provider with `set_script_decisions`; otherwise the person chooses it in the script's Decisions menu. Provider charges and WebMCP approval are separate.
+This bundle includes `customaise://script-decisions`, alongside the UserScript and AgentScript handbooks. It explains the questions written in the code, the CM_decisions API, a working example and bounded recovery. Pair with extension 1.6.0 (Script Decisions was introduced in 1.3.8, the Gemini Decisions API in 1.5.0). Script Decisions is a Power User capability. Saved keys and device authorisation belong to the person's account and extension controls. When the person turns on Script Decisions under Full access in Agent permissions, Claude can choose a script's provider with `set_script_decisions`; otherwise the person chooses it in the script's Decisions menu. Provider charges and WebMCP approval are separate.
 
 ## Script Remotes reference
 

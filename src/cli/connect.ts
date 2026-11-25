@@ -25,7 +25,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { readDaemonRecord, tokenPath, TOKEN_HEADER, httpPortFor, requestedWsPort, type DaemonRecord } from '../daemon.js';
-import { workspaceHeaders } from '../daemon-http.js';
+import { agentHeaders, workspaceHeaders } from '../daemon-http.js';
 import { PKG_VERSION } from '../build-server.js';
 import { EXIT } from './exit-codes.js';
 import { mkdirSync, accessSync, constants } from 'node:fs';
@@ -110,6 +110,8 @@ function spawnDaemon(): void {
 export interface Connected {
   client: Client;
   record: DaemonRecord;
+  /** True when this call started the daemon: the extension has not found it yet. */
+  started: boolean;
 }
 
 export async function connectToDaemon(
@@ -117,6 +119,7 @@ export async function connectToDaemon(
   opts: { allowRestart?: boolean } = {},
 ): Promise<Connected> {
   let record = readDaemonRecord();
+  let started = false;
 
   if (!record || !(await endpointAnswers(record.port))) {
     // Check the one startup failure we can diagnose precisely, before
@@ -134,6 +137,7 @@ export async function connectToDaemon(
     }
 
     spawnDaemon();
+    started = true;
     const port = httpPortFor(requestedWsPort());
     record = await waitForDaemon(port);
     if (!record) {
@@ -159,6 +163,8 @@ export async function connectToDaemon(
             // from some other directory and outlived it, so without this any
             // file it writes on our behalf lands somewhere we cannot see.
             ...workspaceHeaders(process.cwd(), record.workspaceEncoding === 'uri'),
+            // Which agent is at this shell, when the shell says.
+            ...agentHeaders(),
           },
         },
       },
@@ -170,7 +176,8 @@ export async function connectToDaemon(
     if (opts.allowRestart !== false && /401|unauthorized/i.test(String(err?.message))) {
       const current = readDaemonRecord();
       if (current && current.token !== record.token) {
-        return connectToDaemon(fail, { allowRestart: false });
+        const again = await connectToDaemon(fail, { allowRestart: false });
+        return { ...again, started: started || again.started };
       }
     }
     fail(EXIT.UNAVAILABLE, 'Could not reach the Customaise daemon: ' + (err?.message ?? err));
@@ -195,8 +202,9 @@ export async function connectToDaemon(
     if (!(await waitForPortFree(record.port))) {
       fail(EXIT.UNAVAILABLE, 'Old daemon on :' + record.port + ' did not release the port.');
     }
-    return connectToDaemon(fail, { allowRestart: false });
+    const again = await connectToDaemon(fail, { allowRestart: false });
+    return { ...again, started: started || again.started };
   }
 
-  return { client, record };
+  return { client, record, started };
 }

@@ -172,12 +172,15 @@ describe('the published package ships what it claims and nothing dead', () => {
         assert.match(hook, /npm test/, 'prepublishOnly no longer runs the suite');
     });
 
-    it('still declares both binaries, and both have a shebang', () => {
+    it('still declares the server and the command line, and each has a shebang', () => {
         // npm sets the exec bit, but a bin entry without `#!/usr/bin/env node`
         // fails at invocation, and only on a real install.
         const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf-8'));
         const bins = Object.entries<string>(pkg.bin || {});
-        assert.equal(bins.length, 2, 'expected customaise-mcp and customaise');
+        assert.deepEqual(Object.keys(pkg.bin).sort(), ['customaise', 'customaise-mcp', 'mcp'],
+            'expected customaise-mcp, customaise and mcp, the name npx starts the server by');
+        assert.equal(pkg.bin['customaise-mcp'], 'dist/index.js');
+        assert.equal(pkg.bin.customaise, 'dist/cli/index.js');
         for (const [name, target] of bins) {
             const p = join(ROOT, target);
             assert.ok(existsSync(p), `${name} -> ${target} does not exist`);
@@ -186,5 +189,24 @@ describe('the published package ships what it claims and nothing dead', () => {
                 `${name} -> ${target} has no shebang, so npx cannot run it`,
             );
         }
+    });
+
+    it('lets npx choose the server by itself: `npx -y @customaise/mcp`', () => {
+        // npx (libnpmexec, get-bin-from-manifest.js) runs a package's program
+        // without being told which only when the package has one, or one named
+        // like the package without its scope. From 3.0.0, which added the
+        // command line, to 3.6.0 the package had two and neither was `mcp`, so
+        // the command on the install page, the npm front page and in every
+        // setup snippet answered "could not determine executable to run" and
+        // started nothing (found 24 November 2026). Configs people made then
+        // still say it. The test above checked a shebang "so npx can run it"
+        // and never asked whether npx could choose it.
+        const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf-8'));
+        const bin: Record<string, string> = pkg.bin || {};
+        const chosen = new Set(Object.values(bin)).size === 1
+            ? Object.keys(bin)[0]
+            : (bin[pkg.name.replace(/^@[^/]+\//, '')] ? pkg.name.replace(/^@[^/]+\//, '') : null);
+        assert.ok(chosen, 'npx cannot choose a program: `npx -y @customaise/mcp` would start nothing');
+        assert.equal(bin[chosen!], bin['customaise-mcp'], 'the program npx chooses must be the server');
     });
 });

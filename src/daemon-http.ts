@@ -10,6 +10,32 @@ export const WORKSPACE_HEADER = 'x-customaise-workspace';
 export const WORKSPACE_ENCODING_HEADER = 'x-customaise-workspace-encoding';
 
 /** New daemons advertise this encoding in daemon.json before the CLI uses it. */
+/**
+ * Who is driving this command line, when its shell says. The extension's
+ * connect card names the agent a person picked ("Claude Code is connected"),
+ * and a helper that only ever called itself "customaise daemon" showed under
+ * "Any agent" while the tile the person had picked went on listening
+ * (24 November 2026). Claude Code tells every program it runs:
+ * `AI_AGENT=claude-code_<version>_agent` and `CLAUDECODE=1`. An agent whose
+ * shell says nothing sends no header, and the card goes by the tile it is
+ * waiting on.
+ */
+export const AGENT_HEADER = 'x-customaise-agent';
+const AGENT_NAME = /^[a-z0-9][a-z0-9.-]{0,39}$/;
+
+export function agentFromEnvironment(env: NodeJS.ProcessEnv = process.env): string | null {
+  const said = typeof env.AI_AGENT === 'string' && env.AI_AGENT.trim()
+    ? env.AI_AGENT.trim().split(/[_/@\s]/)[0]
+    : (env.CLAUDECODE ? 'claude-code' : '');
+  const name = said.toLowerCase();
+  return AGENT_NAME.test(name) ? name : null;
+}
+
+export function agentHeaders(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const agent = agentFromEnvironment(env);
+  return agent ? { [AGENT_HEADER]: agent } : {};
+}
+
 export function workspaceHeaders(workspace: string, uriSupported: boolean): Record<string, string> {
   if (uriSupported) return {
     [WORKSPACE_HEADER]: encodeURIComponent(workspace),
@@ -72,6 +98,8 @@ interface HttpHandlerOptions {
   fetch: (request: Request) => Promise<Response>;
   activeWorkspaces: Map<string, number>;
   onActivity?: () => void;
+  /** The agent a request says is driving it; only a well-formed name arrives here. */
+  onAgent?: (name: string) => void;
   limits?: Partial<typeof DAEMON_HTTP_LIMITS>;
 }
 
@@ -140,6 +168,8 @@ export function createDaemonHttpHandler(options: HttpHandlerOptions): RequestLis
         signal: ac.signal,
       });
       options.activeWorkspaces.set(workspace, now);
+      const agent = req.headers[AGENT_HEADER];
+      if (typeof agent === 'string' && AGENT_NAME.test(agent)) options.onAgent?.(agent);
       dispatched = true;
       const out = await withRequestContext(
         { workspaceDir: workspace, signal: ac.signal },

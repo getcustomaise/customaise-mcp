@@ -2,6 +2,16 @@
 
 All notable changes to `@customaise/mcp` will be documented in this file.
 
+## [3.6.1] - 2026-11-25
+
+- `npx -y @customaise/mcp` starts the server again. From 3.0.0 to 3.6.0 it answered `could not determine executable to run` and started nothing: the package installs two programs, `customaise-mcp` and `customaise`, and npx chooses by itself only when a package has one, or one named like the package. The package now also installs `mcp`, the name npx looks for, so a client set up with the short command works without an edit. A global install puts `mcp` on PATH beside `customaise-mcp` and `customaise`.
+- The setup snippets in the README name the program: `npx -y -p @customaise/mcp customaise-mcp`. That form also starts 3.0.0 to 3.6.0.
+- `customaise doctor` reports `"extension": "connected"` when the extension answered and Chrome's "Allow user scripts" is off for it. It reported `"unreachable"`, which read as a connection fault. `ok` is still `false`, the exit code is still 3 and `userScripts` is `"DISABLED"`.
+- `customaise doctor` waits up to 8 seconds for the extension when the command itself started the helper daemon. The extension looks for a new helper every few seconds while its connect card is open and every 30 seconds otherwise, so a first run answered "not connected" for a setup that was already working.
+- The command line tells its helper which agent is running it when the shell says so (Claude Code sets `AI_AGENT` and `CLAUDECODE`). With extension 1.6.1 the connect card then says "Claude Code is connected" instead of "Customaise CLI". A shell that says nothing sends nothing.
+- No tool, resource or protocol change. The Claude Desktop bundle is rebuilt at this version.
+- Works with extension 1.6.0. The agent's name on the connect card needs 1.6.1.
+
 ## [3.6.0] - 2026-11-23
 
 - Add the agent inbox for Script Remotes, new in extension 1.6.0: the tools `list_handovers`, `wait_for_handover` and `finish_handover`, and the CLI verbs `customaise inbox`, `customaise inbox wait [--remote ID] [--as NAME] [--timeout SEC]` and `customaise inbox done <id> [--failed "WHY"]`. A remote that a script opened on the user's phone can hand data to the agent. `wait_for_handover` returns the item the moment they tap; one call waits up to 50 seconds, and the CLI repeats it up to its timeout (300 seconds by default, 3,600 at most). `remote` takes only what the remote you sent hands over, and `as` is the name the user's remote shows once you have it. An item is yours until you finish it, and is offered again after 10 minutes if you do not.

@@ -31,7 +31,7 @@ Install the [Customaise Chrome extension](https://customaise.com) on **Chrome 14
   "mcpServers": {
     "customaise": {
       "command": "npx",
-      "args": ["-y", "@customaise/mcp"]
+      "args": ["-y", "-p", "@customaise/mcp", "customaise-mcp"]
     }
   }
 }
@@ -39,7 +39,7 @@ Install the [Customaise Chrome extension](https://customaise.com) on **Chrome 14
 
 **Claude Code** (one command, no file to edit):
 ```bash
-claude mcp add customaise -- npx -y @customaise/mcp
+claude mcp add customaise -- npx -y -p @customaise/mcp customaise-mcp
 ```
 
 **Claude Desktop**: install `customaise.mcpb` from the [latest release](https://github.com/getcustomaise/customaise-mcp/releases/latest). The bundle returns page content inline, which a chat client needs (see [Chat clients and file-less agents](#chat-clients-and-file-less-agents)). Or add it to `claude_desktop_config.json` with the same setting:
@@ -48,7 +48,7 @@ claude mcp add customaise -- npx -y @customaise/mcp
   "mcpServers": {
     "customaise": {
       "command": "npx",
-      "args": ["-y", "@customaise/mcp"],
+      "args": ["-y", "-p", "@customaise/mcp", "customaise-mcp"],
       "env": { "CUSTOMAISE_MCP_OUTPUT": "inline" }
     }
   }
@@ -61,7 +61,7 @@ claude mcp add customaise -- npx -y @customaise/mcp
   "mcpServers": {
     "customaise": {
       "command": "npx",
-      "args": ["-y", "@customaise/mcp"]
+      "args": ["-y", "-p", "@customaise/mcp", "customaise-mcp"]
     }
   }
 }
@@ -71,8 +71,11 @@ claude mcp add customaise -- npx -y @customaise/mcp
 ```toml
 [mcp_servers.customaise]
 command = "npx"
-args = ["-y", "@customaise/mcp"]
+args = ["-y", "-p", "@customaise/mcp", "customaise-mcp"]
+startup_timeout_sec = 60
 ```
+
+The first start downloads the package, so the entry allows 60 seconds. On Windows, if Codex cannot start `npx`, install once with `npm install -g @customaise/mcp` and set `command = "node"` with `args = ["<npm root -g>/@customaise/mcp/dist/index.js"]`.
 
 **Antigravity** (`mcp_config.json`):
 ```json
@@ -80,7 +83,7 @@ args = ["-y", "@customaise/mcp"]
   "mcpServers": {
     "customaise": {
       "command": "npx",
-      "args": ["-y", "@customaise/mcp"]
+      "args": ["-y", "-p", "@customaise/mcp", "customaise-mcp"]
     }
   }
 }
@@ -238,11 +241,13 @@ versions. Contributors should use `npm ci`; dependency updates belong in
 
 Update both the extension and the companion for the latest permission controls
 and status reporting. The npm package contains both `customaise-mcp`
-and the `customaise` CLI; Claude Desktop uses the matching 3.6.0 `.mcpb` bundle.
+and the `customaise` CLI; Claude Desktop uses the `.mcpb` bundle of the same version.
 Restart all MCP clients and any running Customaise CLI daemon after updating.
 Relay protocol 2 is unchanged from 3.2.3. The tool surface grows from 21 to 26
 with the agent inbox and the two remote tools; the other tools and their approval rules are unchanged
-from 3.2.9. There is no 3.5.0: its release candidates became 3.6.0.
+from 3.2.9. There is no 3.5.0: its release candidates became 3.6.0. 3.6.1
+changes no tool or protocol: `npx -y @customaise/mcp` starts the server again,
+and `customaise doctor` no longer calls a connected extension unreachable.
 
 Extension 1.6.0 adds Script Remotes. An AgentScript with
 `@grant CM_remote` opens a page it wrote on the user's phone, and that remote
@@ -572,7 +577,8 @@ The [CLI guide](https://customaise.com/learn/cli) and
 For an agent with a terminal rather than an MCP client.
 
 ```sh
-npm i -g @customaise/mcp     # both binaries on PATH
+npm i -g @customaise/mcp     # customaise and customaise-mcp on PATH (and mcp,
+                             # the name npx starts the server by)
 customaise doctor            # bridge, sign-in, tier, quota, and whether
                              # "Allow user scripts" is on. Costs no quota.
 customaise init              # writes AGENTS.md in this project, so the next
